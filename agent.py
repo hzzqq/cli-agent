@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json as _json
+import os
 import sys
 from typing import Optional
 
@@ -116,6 +117,27 @@ def ask(
         raise typer.Exit(code=1)
     cfg = _build_config(model, base_url, api_key)
     _do_ask(question, top_k, config=cfg, as_json=as_json)
+
+
+@app.command()
+def stats(
+    root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录"),
+):
+    """展示当前索引的统计信息（文件数、总大小、扩展名分布、建立时间）。"""
+    from index_store import INDEX_FILE, index_stats
+
+    path = os.path.join(root, INDEX_FILE)
+    s = index_stats(path)
+    if not s:
+        typer.echo(f"⚠️  未发现索引文件（{path}）。请先运行：python agent.py index <目录>")
+        raise typer.Exit(code=1)
+    typer.echo(f"📊 索引统计（{path}）")
+    typer.echo(f"  文件数：{s['file_count']}")
+    typer.echo(f"  总大小：{s['total_bytes'] / 1024:.1f} KB")
+    typer.echo(f"  建立时间：{s['indexed_at']}")
+    typer.echo("  扩展名分布：")
+    for ext, cnt in s["top_extensions"][:10]:
+        typer.echo(f"    {ext}: {cnt}")
 
 
 @app.command()

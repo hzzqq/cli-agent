@@ -72,13 +72,27 @@ def retrieve(question: str, top_k: int = 5) -> List[IndexEntry]:
     return [e for _, e in scores[:top_k]]
 
 
+# 上下文拼接上限（字符），防止超大仓库把所有片段塞进 prompt 撑爆 LLM 上下文
+MAX_CONTEXT_CHARS = 6000
+
+
 def build_context(question: str, top_k: int = 5) -> tuple[str, List[str]]:
-    """返回 (拼接好的上下文文本, 命中的文件路径列表)。"""
+    """返回 (拼接好的上下文文本, 命中的文件路径列表)。
+
+    拼接受到 MAX_CONTEXT_CHARS 上限约束：一旦累计超过上限且已有内容，
+    则停止追加后续文件（保证最相关的文件优先进入上下文）。
+    """
     hits = retrieve(question, top_k=top_k)
     paths = [e.path for e in hits]
     if not hits:
         return "", []
     parts = []
+    total = 0
     for e in hits:
-        parts.append(f"--- 文件: {e.path} (大小: {e.size} 字节) ---\n{e.snippet}")
+        block = f"--- 文件: {e.path} (大小: {e.size} 字节) ---\n{e.snippet}"
+        # 已有内容且加入会超上限时，停止（保留高相关片段）
+        if parts and total + len(block) > MAX_CONTEXT_CHARS:
+            break
+        parts.append(block)
+        total += len(block)
     return "\n\n".join(parts), paths

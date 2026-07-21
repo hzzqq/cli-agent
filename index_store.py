@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from dataclasses import dataclass, asdict
-from typing import List
+from typing import Dict, List
 
 
 INDEX_FILE = ".cliagent_index.json"
@@ -114,3 +115,27 @@ def load_index(index_path: str = INDEX_FILE) -> List[IndexEntry]:
         return [IndexEntry(**item) for item in data.get("files", [])]
     except (OSError, json.JSONDecodeError, TypeError):
         return []
+
+
+def index_stats(index_path: str = INDEX_FILE) -> "Dict | None":
+    """返回索引统计信息；无索引时返回 None（供 CLI 友好提示）。"""
+    entries = load_index(index_path)
+    if not entries:
+        return None
+    total = sum(e.size for e in entries)
+    ext_counter: Counter = Counter()
+    for e in entries:
+        ext = os.path.splitext(e.path)[1].lower() or "(无扩展名)"
+        ext_counter[ext] += 1
+    indexed_at = ""
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            indexed_at = json.load(f).get("indexed_at", "")
+    except Exception:
+        pass
+    return {
+        "file_count": len(entries),
+        "total_bytes": total,
+        "top_extensions": sorted(ext_counter.items(), key=lambda x: -x[1]),
+        "indexed_at": indexed_at,
+    }
