@@ -15,11 +15,32 @@ from typing import List
 from index_store import IndexEntry, load_index
 
 
-_TOKEN_RE = re.compile(r"[a-zA-Z0-9_\u4e00-\u9fff]+")
+_TOOKEN_RE = re.compile(r"[a-zA-Z0-9_\u4e00-\u9fff]+")
+# CJK 字符区间（含常用汉字）
+_CJK_MIN, _CJK_MAX = "\u4e00", "\u9fff"
+
+
+def _is_cjk(ch: str) -> bool:
+    return _CJK_MIN <= ch <= _CJK_MAX
 
 
 def _tokenize(text: str) -> List[str]:
-    return [t.lower() for t in _TOKEN_RE.findall(text or "")]
+    """分词：英文/数字按原词，中文做「整词 + 单字 + 相邻二元」展开。
+
+    原实现把「关于foo的说明」当成一个整 token，导致 query「关于」
+    无法命中（精确 token 匹配失效）。这里对含 CJK 的 token 额外生成
+    单字与相邻 bigram，使中文短语的部分匹配也能召回。
+    """
+    raw = [t.lower() for t in _TOOKEN_RE.findall(text or "")]
+    out: List[str] = []
+    for tok in raw:
+        out.append(tok)
+        cjk_chars = [ch for ch in tok if _is_cjk(ch)]
+        if len(cjk_chars) >= 2:
+            out.extend(cjk_chars)  # 单字
+            for i in range(len(cjk_chars) - 1):
+                out.append(cjk_chars[i] + cjk_chars[i + 1])  # 相邻二元
+    return out
 
 
 def _build_documents(entries: List[IndexEntry]):

@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from index_store import INDEX_FILE, IndexEntry, save_index  # noqa: E402
-from retriever import MAX_CONTEXT_CHARS, build_context, retrieve  # noqa: E402
+from retriever import MAX_CONTEXT_CHARS, _tokenize, build_context, retrieve  # noqa: E402
 
 
 @pytest.fixture
@@ -68,3 +68,35 @@ def test_build_context_no_hit(tmp_path, monkeypatch):
     text, paths = build_context("foo", top_k=5)
     assert text == ""
     assert paths == []
+
+
+@pytest.fixture
+def cn_index(tmp_path, monkeypatch):
+    entries = [
+        IndexEntry(path="模型训练.py", size=30, snippet="深度学习模型训练需要大量标注数据"),
+        IndexEntry(path="数据清洗.py", size=30, snippet="数据清洗与特征工程是预处理步骤"),
+        IndexEntry(path="readme.md", size=10, snippet="本项目用于模型训练流水线"),
+    ]
+    save_index(entries, str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def test_chinese_tokenize_bigram():
+    toks = _tokenize("深度学习")
+    assert "深度" in toks
+    assert "学习" in toks
+    assert "深度学习" in toks
+
+
+def test_chinese_phrase_recall(cn_index):
+    # 「标注数据」只出现在 模型训练.py，且 query 非整词相等
+    hits = retrieve("如何准备标注数据", top_k=1)
+    assert hits and hits[0].path == "模型训练.py"
+
+
+def test_chinese_query_hits_partial(cn_index):
+    # query「数据」应召回含「数据」的文件（标注数据 / 数据清洗）
+    hits = retrieve("数据处理", top_k=3)
+    paths = [e.path for e in hits]
+    assert "数据清洗.py" in paths
