@@ -96,6 +96,16 @@ def build_index(
     {"unsupported_ext", "ext_filter", "too_large", "unreadable", "excluded"}，
     便于 CLI 向用户公示「哪些文件没被索引」以提升可观测性。
     """
+    # R2 修复（隐性可用性缺陷）：用户若写 `--ext py`（无点），exts 会是 {"py"}，
+    # 而 TEXT_EXTS 存的是 ".py"，导致全部文件被判定为 ext_filter、索引结果为空、
+    # 用户困惑「为何一个文件都没索引到」。这里统一把扩展名归一化为带点的小写形式，
+    # 使 `--ext py` 与 `--ext .py` / `--ext PY` 行为一致。
+    if exts is not None:
+        exts = {
+            ("." + e.strip().lower()) if not e.strip().lower().startswith(".")
+            else e.strip().lower()
+            for e in exts
+        }
     prev_by_path = {e.path: e for e in (prev or [])}
     entries: List[IndexEntry] = []
     skipped: List[dict] = []

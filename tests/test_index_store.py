@@ -60,6 +60,32 @@ def test_build_index_ext_filter(tmp_path):
     assert any(s["reason"] == "ext_filter" and s["path"].endswith("b.md") for s in skipped)
 
 
+def test_build_index_normalizes_ext_without_dot(tmp_path):
+    """R2 修复验证：--ext py（无点）应归一化为 .py，避免静默索引为空。"""
+    (tmp_path / "a.py").write_text("x = 1")
+    (tmp_path / "b.md").write_text("# title")
+    (tmp_path / "c.txt").write_text("hi")
+    # 用户漏写点：py / .MD 大小写混合，均应正确归一化
+    entries, skipped = build_index(str(tmp_path), exts={"py", ".MD"})
+    paths = {e.path for e in entries}
+    assert str(tmp_path / "a.py") in paths
+    assert str(tmp_path / "b.md") in paths
+    assert str(tmp_path / "c.txt") not in paths  # 不在白名单
+    reasons = {s["reason"] for s in skipped}
+    assert "ext_filter" in reasons
+
+
+def test_index_command_ext_without_dot(tmp_path):
+    """端到端：CLI --ext py 应索引到 .py 文件，而非静默为空。"""
+    (tmp_path / "a.py").write_text("x = 1")
+    (tmp_path / "b.txt").write_text("hi")
+    r = runner.invoke(
+        agent.app, ["index", str(tmp_path), "--root", str(tmp_path), "--ext", "py"]
+    )
+    assert r.exit_code == 0
+    assert "已索引 1 个文件" in r.stdout  # a.py 被索引（而非 0）
+
+
 def test_index_command_reports_skipped(tmp_path):
     """端到端：CLI 应公示跳过的文件数量与原因。"""
     (tmp_path / "small.py").write_text("def f(): pass")
