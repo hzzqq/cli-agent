@@ -132,3 +132,27 @@ def test_index_stats_missing_file_returns_none(tmp_path):
     """索引文件不存在时 index_stats 返回 None（供 CLI 友好提示）。"""
     from index_store import index_stats
     assert index_stats(str(tmp_path / "nope.json")) is None
+
+
+def test_load_index_skips_malformed_entries(tmp_path):
+    """R2 验证：单条条目损坏（如缺 snippet）不应拖垮整个索引，只跳过坏条目。
+
+    旧实现用整体列表推导 IndexEntry(**item)，任一坏条目触发 TypeError 被
+    外层捕获后整个索引返回 []，导致 _require_index 误报「未发现索引文件」、
+    ask 直接中止。现改为逐条构造、跳过坏条目，保留可用部分。
+    """
+    import json as _j
+    from index_store import load_index
+
+    payload = {
+        "indexed_at": "t",
+        "files": [
+            {"path": "a.py", "size": 10, "snippet": "x"},
+            {"path": "b.py", "size": 5},  # 缺 snippet -> TypeError，应跳过
+        ],
+    }
+    p = tmp_path / INDEX_FILE
+    p.write_text(_j.dumps(payload), encoding="utf-8")
+    entries = load_index(str(p))
+    assert len(entries) == 1
+    assert entries[0].path == "a.py"

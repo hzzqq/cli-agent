@@ -425,3 +425,53 @@ def test_ask_no_hits_warns_ungrounded(monkeypatch):
     r = runner.invoke(agent.app, ["ask", "问题"])
     assert r.exit_code == 0
     assert "未检索到相关文件" in (r.stderr or r.stdout)
+
+
+def test_session_roundtrip(tmp_path):
+    """R1 新能力验证：save_session / load_session 可持久化并还原会话历史。"""
+    import json as _j
+
+    p = tmp_path / "s.json"
+    hist = [
+        {"role": "user", "content": "你好"},
+        {"role": "assistant", "content": "你好，有什么可以帮你？"},
+    ]
+    agent.save_session(str(p), hist)
+    assert p.exists()
+    assert agent.load_session(str(p)) == hist
+
+
+def test_load_session_skips_malformed(tmp_path):
+    """R1 验证：load_session 过滤畸形消息，只保留合法 {role,content} 项。"""
+    import json as _j
+
+    p = tmp_path / "s.json"
+    p.write_text(_j.dumps([
+        {"role": "user", "content": "ok"},
+        {"role": "weird"},        # 缺 content
+        "not_a_dict",             # 非对象
+    ]), encoding="utf-8")
+    assert agent.load_session(str(p)) == [{"role": "user", "content": "ok"}]
+
+
+def test_chat_session_persists_history(tmp_path, monkeypatch):
+    """R1 验证：chat --session 在每轮后落盘历史，支持跨重启续聊。"""
+    import json as _j
+    from index_store import IndexEntry
+
+    sess = tmp_path / "sess.json"
+    monkeypatch.setenv("MOCK_LLM", "1")
+    # 让 _require_index 通过（不要求真实索引）
+    monkeypatch.setattr(
+        agent, "load_index",
+        lambda *a, **k: [IndexEntry(path="a.py", size=1, snippet="x")],
+    )
+    r = runner.invoke(
+        agent.app, ["chat", "--session", str(sess)], input="你好\nexit\n"
+    )
+    assert r.exit_code == 0
+    assert sess.exists()
+    data = _j.loads(sess.read_text(encoding="utf-8"))
+    assert any(
+        m.get("role") == "user" and "你好" in m.get("content", "") for m in data
+    )
