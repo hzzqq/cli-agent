@@ -163,6 +163,20 @@ def context(
         typer.echo(text[:2000])
 
 
+def _excerpt(text: str, keyword: str, width: int = 60) -> str:
+    """截取包含关键词的一小段上下文，便于用户确认命中位置。"""
+    if not text:
+        return ""
+    low = text.lower()
+    kw = keyword.lower()
+    idx = low.find(kw)
+    if idx == -1:
+        return text[:width]
+    start = max(0, idx - width // 2)
+    end = min(len(text), start + width)
+    return text[start:end].replace("\n", " ")
+
+
 @app.command()
 def search(
     keyword: str = typer.Argument(..., help="在索引内容中检索的关键词"),
@@ -179,6 +193,24 @@ def search(
     typer.echo(f"🔍 命中 {len(hits)} 个文件：")
     for e in hits:
         typer.echo(f"  - {e.path}")
+        excerpt = _excerpt(e.snippet or "", keyword)
+        if excerpt:
+            typer.echo(f"      …{excerpt}…")
+
+
+@app.command()
+def prune(
+    root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录"),
+):
+    """清理索引中已删除文件的陈旧条目（不调用 LLM）。"""
+    from index_store import INDEX_FILE, prune_missing
+
+    path = os.path.join(root, INDEX_FILE)
+    removed = prune_missing(root, path)
+    if removed:
+        typer.echo(f"🧹 已移除 {removed} 个陈旧索引条目：{path}")
+    else:
+        typer.echo(f"✅ 索引干净，无需清理：{path}")
 
 
 @app.command()

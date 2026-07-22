@@ -120,3 +120,43 @@ def test_ask_empty_question_errors(monkeypatch):
     r = runner.invoke(agent.app, ["ask"], input="")
     assert r.exit_code == 1
     assert "不能为空" in (r.stderr or r.stdout)
+
+
+def test_search_command_shows_excerpt(tmp_path):
+    """R2 可观测性：search 应展示命中关键词的上下文片段，而非仅路径。"""
+    from index_store import IndexEntry, save_index
+
+    save_index(
+        [IndexEntry(path="foo.py", size=10, snippet="def hello_world(): pass")],
+        str(tmp_path),
+    )
+    r = runner.invoke(agent.app, ["search", "hello", "--root", str(tmp_path)])
+    assert r.exit_code == 0
+    assert "foo.py" in r.stdout
+    assert "hello_world" in r.stdout  # 片段中应含命中词
+
+
+def test_prune_command_removes_stale(tmp_path):
+    """R1 新需求验证：prune 命令清理已删除文件的陈旧索引条目。"""
+    from index_store import IndexEntry, save_index
+
+    # 索引里记录一个已不存在的文件
+    save_index(
+        [IndexEntry(path=str(tmp_path / "gone.py"), size=10, snippet="x")],
+        str(tmp_path),
+    )
+    r = runner.invoke(agent.app, ["prune", "--root", str(tmp_path)])
+    assert r.exit_code == 0
+    assert "已移除 1 个" in r.stdout
+
+
+def test_prune_command_clean(tmp_path):
+    """索引无陈旧条目时，prune 应报告无需清理。"""
+    from index_store import IndexEntry, save_index
+
+    keep = tmp_path / "keep.py"
+    keep.write_text("x = 1")
+    save_index([IndexEntry(path=str(keep), size=5, snippet="x = 1")], str(tmp_path))
+    r = runner.invoke(agent.app, ["prune", "--root", str(tmp_path)])
+    assert r.exit_code == 0
+    assert "无需清理" in r.stdout
