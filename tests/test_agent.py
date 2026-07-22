@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json as _json
 import sys
 from pathlib import Path
 
@@ -694,3 +695,18 @@ def test_related_command_json_output(tmp_path, monkeypatch):
     assert isinstance(data, list) and len(data) >= 1
     assert data[0]["path"] != "target.py"  # 排除自身
     assert "score" in data[0]
+
+
+def test_index_json_output(monkeypatch, tmp_path):
+    """R1 新需求验证：index --json 输出结构化索引摘要，且进度提示不污染 stdout。"""
+    (tmp_path / "a.py").write_text("def f(): pass")
+    (tmp_path / "b.md").write_text("# title")
+    (tmp_path / "c.png").write_text("binary")  # 非文本扩展名，进入 skipped
+    monkeypatch.chdir(tmp_path)
+    r = runner.invoke(agent.app, ["index", ".", "--json"])
+    assert r.exit_code == 0
+    data = _json.loads(r.stdout)  # 整段 stdout 必须是合法 JSON（进度提示已抑制）
+    assert data["file_count"] >= 2
+    assert data["index_path"].endswith(".cliagent_index.json")
+    reasons = {s["reason"] for s in data["skipped"]}
+    assert "unsupported_ext" in reasons

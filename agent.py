@@ -249,6 +249,7 @@ def index(
     exclude: Optional[str] = typer.Option(
         None, "--exclude", help="忽略模式（逗号分隔，fnmatch）：相对路径或文件名匹配则跳过，如 'tests/*,*.min.js'"
     ),
+    as_json: bool = typer.Option(False, "--json", help="以 JSON 输出索引摘要（file_count/skipped_count/skipped/index_path），便于流水线消费"),
 ):
     """递归遍历目录，建立文本文件索引。"""
     # R2 修复（隐性可观测性/失败快速）：原实现对不存在的目录静默执行，
@@ -260,23 +261,37 @@ def index(
     exts = None
     if ext:
         exts = {e.strip().lower() for e in ext.split(",") if e.strip()}
-        typer.echo(f"🔍 扩展名过滤：{', '.join(sorted(exts))}")
-    typer.echo(f"🔍 正在索引目录：{path}")
+        if not as_json:
+            typer.echo(f"🔍 扩展名过滤：{', '.join(sorted(exts))}")
+    if not as_json:
+        typer.echo(f"🔍 正在索引目录：{path}")
     prev = load_index(os.path.join(root, INDEX_FILE)) if incremental else None
     if incremental:
         # 隐性可观测性：原实现在「无旧索引」时静默不提示，用户误以为增量生效；
         # 这里显式区分「复用」与「全量重建」，避免误导。
-        if prev:
-            typer.echo(f"♻️  增量模式：载入旧索引 {len(prev)} 条，复用未变更文件")
-        else:
-            typer.echo("♻️  增量模式：未发现旧索引，将执行全量重建")
+        if not as_json:
+            if prev:
+                typer.echo(f"♻️  增量模式：载入旧索引 {len(prev)} 条，复用未变更文件")
+            else:
+                typer.echo("♻️  增量模式：未发现旧索引，将执行全量重建")
     exclude_list = None
     if exclude:
         # 解析逗号分隔的忽略模式；逐个 strip 以容忍 "tests/* ,*.min.js" 这类空格
         exclude_list = [e.strip() for e in exclude.split(",") if e.strip()]
-        typer.echo(f"🚫 忽略模式：{', '.join(exclude_list)}")
+        if not as_json:
+            typer.echo(f"🚫 忽略模式：{', '.join(exclude_list)}")
     entries, skipped = build_index(path, exts=exts, max_size=max_size, prev=prev, exclude=exclude_list)
     out = save_index(entries, root)
+    if as_json:
+        # R1 新能力：机读索引摘要，便于 CI / 流水线消费（与 search/files/related 一致）
+        payload = {
+            "file_count": len(entries),
+            "skipped_count": len(skipped),
+            "skipped": [{"path": s["path"], "reason": s["reason"]} for s in skipped],
+            "index_path": out,
+        }
+        typer.echo(_json.dumps(payload, ensure_ascii=False, indent=2))
+        return
     typer.echo(f"✅ 已索引 {len(entries)} 个文件，索引保存到 {out}")
     if skipped:
         typer.echo(f"⏭️  跳过 {len(skipped)} 个文件（不受支持类型/超大/不可读）")
