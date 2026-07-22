@@ -105,13 +105,21 @@ def _save_file_config(cfg: LLMConfig, root: str = ".") -> None:
 
 
 def _build_config(
-    model: Optional[str], base_url: Optional[str], api_key: Optional[str], root: str = "."
+    model: Optional[str],
+    base_url: Optional[str],
+    api_key: Optional[str],
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+    timeout: Optional[float] = None,
+    root: str = ".",
 ) -> Optional[LLMConfig]:
     """根据 CLI 覆盖项构造 LLMConfig；CLI 缺省时回落到持久化配置文件；
     两者皆无则沿用环境变量默认值（返回 None）。
 
     R1 新能力：配置文件让常用接入项「一次写入、处处复用」，无需每次敲长 flag。
     优先级：CLI flag > 配置文件 > 环境变量默认。
+    CLI 生成参数（max_tokens/temperature/timeout）同样以 CLI 优先级最高，
+    即便未设置 model/base_url/api_key 也单独生效（此前这些参数无法覆盖）。
     """
     file_cfg = _load_file_config(root)
     overrides = {
@@ -119,12 +127,23 @@ def _build_config(
         "base_url": base_url or file_cfg.get("base_url"),
         "api_key": api_key or file_cfg.get("api_key"),
     }
-    if not any(overrides.values()):
-        return None
-    cfg = LLMConfig()
-    for k, v in overrides.items():
-        if v:
-            setattr(cfg, k, v)
+    cfg = None
+    if any(overrides.values()):
+        cfg = LLMConfig()
+        for k, v in overrides.items():
+            if v:
+                setattr(cfg, k, v)
+    # 生成参数（成本/采样/超时控制）单独覆盖，优先级最高，且不依赖接入项是否设置
+    gen = {
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "timeout": timeout,
+    }
+    if any(v is not None for v in gen.values()):
+        cfg = cfg or LLMConfig()
+        for k, v in gen.items():
+            if v is not None:
+                setattr(cfg, k, v)
     return cfg
 
 
@@ -310,6 +329,9 @@ def ask(
     model: Optional[str] = typer.Option(None, "--model", help="指定模型名称"),
     base_url: Optional[str] = typer.Option(None, "--base-url", help="指定 API 地址"),
     api_key: Optional[str] = typer.Option(None, "--api-key", help="指定 API Key"),
+    max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="最大生成 token 数（成本/长度控制，覆盖默认值）"),
+    temperature: Optional[float] = typer.Option(None, "--temperature", help="采样温度（控制创造性，覆盖默认值）"),
+    timeout: Optional[float] = typer.Option(None, "--timeout", help="请求超时秒数（覆盖默认值）"),
     as_json: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
     system_prompt: Optional[str] = typer.Option(None, "--system-prompt", help="自定义系统提示（内联），覆盖默认助手提示"),
     system_prompt_file: Optional[str] = typer.Option(None, "--system-prompt-file", help="从文件读取系统提示（优先于 --system-prompt）"),
@@ -337,7 +359,7 @@ def ask(
     # 隐性问题：索引要求是「检索」的前置条件；--no-context 下无需索引也应允许提问
     if not no_context and not _require_index():
         raise typer.Exit(code=1)
-    cfg = _build_config(model, base_url, api_key)
+    cfg = _build_config(model, base_url, api_key, max_tokens=max_tokens, temperature=temperature, timeout=timeout)
     sp = _resolve_system_prompt(system_prompt, system_prompt_file)
     _do_ask(
         question, top_k, config=cfg, as_json=as_json, min_score=min_score,
@@ -720,6 +742,9 @@ def chat(
     model: Optional[str] = typer.Option(None, "--model", help="指定模型名称"),
     base_url: Optional[str] = typer.Option(None, "--base-url", help="指定 API 地址"),
     api_key: Optional[str] = typer.Option(None, "--api-key", help="指定 API Key"),
+    max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="最大生成 token 数（成本/长度控制，覆盖默认值）"),
+    temperature: Optional[float] = typer.Option(None, "--temperature", help="采样温度（控制创造性，覆盖默认值）"),
+    timeout: Optional[float] = typer.Option(None, "--timeout", help="请求超时秒数（覆盖默认值）"),
     system_prompt: Optional[str] = typer.Option(None, "--system-prompt", help="自定义系统提示（内联），覆盖默认助手提示"),
     system_prompt_file: Optional[str] = typer.Option(None, "--system-prompt-file", help="从文件读取系统提示（优先于 --system-prompt）"),
     no_context: bool = typer.Option(False, "--no-context", help="跳过仓库检索，每轮直接把问题交给 LLM（纯通用对话）"),
@@ -733,7 +758,7 @@ def chat(
     """进入交互式多轮对话，每轮都带上检索到的上下文。输入 exit/quit 退出。"""
     if not no_context and not _require_index():
         raise typer.Exit(code=1)
-    cfg = _build_config(model, base_url, api_key)
+    cfg = _build_config(model, base_url, api_key, max_tokens=max_tokens, temperature=temperature, timeout=timeout)
     sp = _resolve_system_prompt(system_prompt, system_prompt_file)
     typer.echo("💬 进入对话模式（输入 exit 或 quit 退出）：")
     # R1 新能力：从持久化文件恢复多轮历史，使对话可跨 CLI 重启续聊

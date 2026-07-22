@@ -744,3 +744,39 @@ def test_config_save_warns_plaintext_api_key(monkeypatch, tmp_path):
     r = runner.invoke(agent.app, ["config", "--api-key", "secret123", "--save"])
     assert r.exit_code == 0
     assert "明文" in (r.stderr or r.stdout)  # 告警明文存储
+
+
+def test_build_config_passes_generation_params(monkeypatch):
+    """R1 新需求验证：--max-tokens/--temperature/--timeout 经 _build_config 透传 LLMConfig。
+    R2 修复：此前这些生成参数无法覆盖（仅模型/地址/密钥可被设置）。"""
+    monkeypatch.setattr(agent, "_load_file_config", lambda root=".": {})
+    cfg = agent._build_config(None, None, None, max_tokens=512, temperature=0.9, timeout=10.0)
+    assert cfg is not None
+    assert cfg.max_tokens == 512
+    assert cfg.temperature == 0.9
+    assert cfg.timeout == 10.0
+
+
+def test_build_config_no_args_returns_none(monkeypatch):
+    """R2 回归：无任何覆盖项时仍返回 None（沿用环境变量默认），不破坏既有行为。"""
+    monkeypatch.setattr(agent, "_load_file_config", lambda root=".": {})
+    assert agent._build_config(None, None, None) is None
+
+
+def test_ask_passes_generation_params_to_client(monkeypatch):
+    """R1 验证：ask 的 --max-tokens/--temperature 透传给 LLMClient 配置。"""
+    captured = {}
+
+    def fake_complete(self, messages, context_files=None, system_prompt=None):
+        captured["max_tokens"] = self.config.max_tokens
+        captured["temperature"] = self.config.temperature
+        return "答案"
+
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent.LLMClient, "complete", fake_complete)
+    r = runner.invoke(agent.app, ["ask", "问题", "--max-tokens", "256", "--temperature", "0.7"])
+    assert r.exit_code == 0
+    assert captured.get("max_tokens") == 256
+    assert captured.get("temperature") == 0.7
