@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from index_store import INDEX_FILE, IndexEntry, save_index  # noqa: E402
+from index_store import INDEX_FILE, IndexEntry, save_index, load_index, search_index, prune_missing  # noqa: E402
 from retriever import MAX_CONTEXT_CHARS, _tokenize, build_context, retrieve  # noqa: E402
 
 
@@ -121,4 +121,32 @@ def test_build_context_labels_score(sample_index):
     text, paths = build_context("foo", top_k=5)
     assert "相关度" in text  # 可观测性：上下文标注相关度
     assert "大小:" in text
+
+
+def test_search_index_finds_match(tmp_path):
+    entries = [IndexEntry(path="foo.py", size=10, snippet="def hello(): pass")]
+    save_index(entries, str(tmp_path))
+    hits = search_index("hello", str(tmp_path / INDEX_FILE))
+    assert len(hits) == 1 and hits[0].path == "foo.py"
+
+
+def test_search_index_no_keyword(tmp_path):
+    entries = [IndexEntry(path="foo.py", size=10, snippet="def hello(): pass")]
+    save_index(entries, str(tmp_path))
+    assert search_index("", str(tmp_path / INDEX_FILE)) == []
+
+
+def test_prune_missing_removes_gone_file(tmp_path):
+    p = tmp_path / "gone.py"
+    p.write_text("x = 1")
+    keep = tmp_path / "keep.py"
+    keep.write_text("y = 2")
+    entries = [IndexEntry(path=str(p), size=4, snippet="x = 1"),
+               IndexEntry(path=str(keep), size=3, snippet="y = 2")]
+    save_index(entries, str(tmp_path))
+    p.unlink()  # 模拟文件被删除
+    removed = prune_missing(str(tmp_path), str(tmp_path / INDEX_FILE))
+    assert removed == 1
+    remaining = load_index(str(tmp_path / INDEX_FILE))
+    assert [e.path for e in remaining] == [str(keep)]
 

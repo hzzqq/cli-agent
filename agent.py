@@ -148,6 +148,24 @@ def context(
 
 
 @app.command()
+def search(
+    keyword: str = typer.Argument(..., help="在索引内容中检索的关键词"),
+    root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录"),
+):
+    """在本仓库索引中按关键词检索（不调用 LLM），快速定位相关文件。"""
+    from index_store import INDEX_FILE, search_index
+
+    path = os.path.join(root, INDEX_FILE)
+    hits = search_index(keyword, path)
+    if not hits:
+        typer.echo("未找到匹配的文件。")
+        raise typer.Exit(code=1)
+    typer.echo(f"🔍 命中 {len(hits)} 个文件：")
+    for e in hits:
+        typer.echo(f"  - {e.path}")
+
+
+@app.command()
 def stats(
     root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录"),
 ):

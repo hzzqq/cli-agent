@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 from collections import Counter
@@ -98,7 +99,7 @@ def build_index(root: str, exts: "set[str] | None" = None) -> List[IndexEntry]:
 def save_index(entries: List[IndexEntry], root: str = ".") -> str:
     out_path = os.path.join(root, INDEX_FILE)
     payload = {
-        "indexed_at": __import__("datetime").datetime.now().isoformat(),
+        "indexed_at": _dt.datetime.now().isoformat(),
         "files": [asdict(e) for e in entries],
     }
     with open(out_path, "w", encoding="utf-8") as f:
@@ -115,6 +116,37 @@ def load_index(index_path: str = INDEX_FILE) -> List[IndexEntry]:
         return [IndexEntry(**item) for item in data.get("files", [])]
     except (OSError, json.JSONDecodeError, TypeError):
         return []
+
+
+def search_index(keyword: str, index_path: str = INDEX_FILE) -> List[IndexEntry]:
+    """在索引的 snippet / 路径中按关键词（大小写不敏感）检索。
+
+    用于「不调用 LLM」时快速定位相关文件，是对 retriever 的轻量补充。
+    """
+    if not keyword:
+        return []
+    kw = keyword.lower()
+    hits = []
+    for e in load_index(index_path):
+        if kw in (e.snippet or "").lower() or kw in e.path.lower():
+            hits.append(e)
+    return hits
+
+
+def prune_missing(root: str, index_path: str = INDEX_FILE) -> int:
+    """移除索引中已不存在的文件条目（陈旧索引清理），返回被移除数量。
+
+    就地重写索引；无匹配时不动文件。
+    """
+    entries = load_index(index_path)
+    if not entries:
+        return 0
+    kept = [e for e in entries if os.path.exists(e.path)]
+    removed = len(entries) - len(kept)
+    if removed:
+        out_dir = os.path.dirname(os.path.abspath(index_path)) or "."
+        save_index(kept, out_dir)
+    return removed
 
 
 def index_stats(index_path: str = INDEX_FILE) -> "Dict | None":

@@ -76,3 +76,22 @@ def test_ask_min_score_passed_to_build_context(monkeypatch):
     r = runner.invoke(agent.app, ["ask", "问题", "--min-score", "0.5"])
     assert r.exit_code == 0
     assert captured.get("min_score") == 0.5
+
+
+def test_search_command(monkeypatch, tmp_path):
+    """R1 新需求验证：search 命令在索引中按关键词定位文件。"""
+    from index_store import IndexEntry, save_index
+
+    save_index([IndexEntry(path="foo.py", size=10, snippet="def hello(): pass")], str(tmp_path))
+    r = runner.invoke(agent.app, ["search", "hello", "--root", str(tmp_path)])
+    assert r.exit_code == 0
+    assert "foo.py" in r.stdout
+
+
+def test_search_command_no_hit(tmp_path):
+    from index_store import IndexEntry, save_index
+
+    save_index([IndexEntry(path="foo.py", size=10, snippet="def hello(): pass")], str(tmp_path))
+    r = runner.invoke(agent.app, ["search", "nomatch", "--root", str(tmp_path)])
+    assert r.exit_code == 1
+    assert "未找到" in r.stdout
