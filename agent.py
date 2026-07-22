@@ -100,12 +100,15 @@ def _do_ask(
     no_context: bool = False,
     save_path: Optional[str] = None,
     verbose: bool = False,
+    max_context_chars: int = 6000,
 ):
     # 隐性问题：--no-context 下不应再强制检索，否则会为「纯通用问题」无谓加载索引
     if no_context:
         context_text, paths = "", []
     else:
-        context_text, paths = build_context(question, top_k=top_k, min_score=min_score)
+        context_text, paths = build_context(
+            question, top_k=top_k, min_score=min_score, max_context_chars=max_context_chars
+        )
     # R1 可观测性：--verbose 展示检索概况，便于排查召回质量
     if verbose:
         n_chars = len(context_text)
@@ -210,6 +213,7 @@ def ask(
     question_file: Optional[str] = typer.Option(None, "--file", help="从文件读取问题（支持长/多行问题，优先于位置参数与管道）"),
     save_path: Optional[str] = typer.Option(None, "--save", help="把答案写入指定文件（便于脚本化消费/归档）"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="打印检索概况（命中文件数 / 上下文字符数 / 估算 token）"),
+    max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符），超出后停止追加更低相关文件"),
 ):
     """基于索引检索相关文件并调用 LLM 作答。"""
     # 问题来源优先级：--file > 位置参数 > 管道（stdin）
@@ -232,6 +236,7 @@ def ask(
     _do_ask(
         question, top_k, config=cfg, as_json=as_json, min_score=min_score,
         system_prompt=sp, no_context=no_context, save_path=save_path, verbose=verbose,
+        max_context_chars=max_context_chars,
     )
 
 
@@ -240,12 +245,13 @@ def context(
     question: str = typer.Argument(..., help="要检索的问题，用引号包裹"),
     top_k: int = typer.Option(5, "--top-k", "-k", help="召回的相关文件数量"),
     min_score: float = typer.Option(0.0, "--min-score", help="最低相关度阈值，过滤弱相关文件"),
+    max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符）"),
 ):
     """仅展示检索到的上下文与参考文件（不调用 LLM）。
 
     便于排查检索质量、核对参考来源，或在不想消耗 LLM 额度时预览。
     """
-    text, paths = build_context(question, top_k=top_k, min_score=min_score)
+    text, paths = build_context(question, top_k=top_k, min_score=min_score, max_context_chars=max_context_chars)
     if not paths:
         typer.echo("🔎 未检索到相关文件，请确认索引已建立且问题与仓库内容相关。")
         raise typer.Exit(code=1)
@@ -400,6 +406,7 @@ def chat(
     system_prompt_file: Optional[str] = typer.Option(None, "--system-prompt-file", help="从文件读取系统提示（优先于 --system-prompt）"),
     no_context: bool = typer.Option(False, "--no-context", help="跳过仓库检索，每轮直接把问题交给 LLM（纯通用对话）"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="打印检索概况（命中文件数 / 上下文字符数 / 估算 token）"),
+    max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符），超出后停止追加更低相关文件"),
 ):
     """进入交互式多轮对话，每轮都带上检索到的上下文。输入 exit/quit 退出。"""
     if not no_context and not _require_index():
@@ -419,7 +426,7 @@ def chat(
         if question.lower() in ("exit", "quit", "q"):
             typer.echo("👋 再见。")
             break
-        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context, verbose=verbose)
+        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context, verbose=verbose, max_context_chars=max_context_chars)
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": answer})
         typer.echo("")

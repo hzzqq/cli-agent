@@ -23,7 +23,7 @@ runner = CliRunner()
 def test_context_command_shows_refs(monkeypatch):
     """R1 新需求验证：context 命令只展示检索结果，不调用 LLM。"""
     monkeypatch.setattr(
-        agent, "build_context", lambda q, top_k=5, min_score=0.0: ("这是一段上下文", ["a.py", "b.py"])
+        agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("这是一段上下文", ["a.py", "b.py"])
     )
     r = runner.invoke(agent.app, ["context", "这个函数是做什么的"])
     assert r.exit_code == 0
@@ -32,7 +32,7 @@ def test_context_command_shows_refs(monkeypatch):
 
 
 def test_context_command_no_hit(monkeypatch):
-    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("", []))
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("", []))
     r = runner.invoke(agent.app, ["context", "无关问题"])
     assert r.exit_code == 1
     assert "未检索到" in r.stdout
@@ -42,7 +42,7 @@ def test_ask_handles_llm_error_gracefully(monkeypatch):
     """R2 隐式问题验证：LLM 调用失败应被友好捕获，而非抛出裸栈。"""
     monkeypatch.setenv("MOCK_LLM", "0")  # 强制真实分支
     monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
-    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("ctx", ["a.py"]))
 
     def boom(self, messages, context_files=None, system_prompt=None):
         raise agent.LLMError("模拟网络错误")
@@ -56,7 +56,7 @@ def test_ask_handles_llm_error_gracefully(monkeypatch):
 def test_ask_mock_path_succeeds(monkeypatch):
     monkeypatch.setenv("MOCK_LLM", "1")  # 走 mock 分支
     monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
-    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("ctx", ["a.py"]))
     r = runner.invoke(agent.app, ["ask", "问题"])
     assert r.exit_code == 0
     assert "MOCK" in r.stdout
@@ -72,7 +72,7 @@ def test_ask_passes_system_prompt(monkeypatch):
 
     monkeypatch.setenv("MOCK_LLM", "1")
     monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
-    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("ctx", ["a.py"]))
     monkeypatch.setattr(agent.LLMClient, "complete", fake_complete)
     r = runner.invoke(agent.app, ["ask", "问题", "--system-prompt", "你是严谨的助手"])
     assert r.exit_code == 0
@@ -91,7 +91,7 @@ def test_ask_system_prompt_file(monkeypatch, tmp_path):
 
     monkeypatch.setenv("MOCK_LLM", "1")
     monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
-    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("ctx", ["a.py"]))
     monkeypatch.setattr(agent.LLMClient, "complete", fake_complete)
     r = runner.invoke(agent.app, ["ask", "问题", "--system-prompt-file", str(sp_file)])
     assert r.exit_code == 0
@@ -123,7 +123,7 @@ def test_ask_min_score_passed_to_build_context(monkeypatch):
     """R1 新需求验证：--min-score 选项应透传给 build_context。"""
     captured = {}
 
-    def fake_build(question, top_k=5, min_score=0.0):
+    def fake_build(question, top_k=5, min_score=0.0, max_context_chars=6000):
         captured["min_score"] = min_score
         return "ctx", ["a.py"]
 
@@ -133,6 +133,22 @@ def test_ask_min_score_passed_to_build_context(monkeypatch):
     r = runner.invoke(agent.app, ["ask", "问题", "--min-score", "0.5"])
     assert r.exit_code == 0
     assert captured.get("min_score") == 0.5
+
+
+def test_ask_max_context_chars_passed(monkeypatch):
+    """R1 新需求验证：--max-context-chars 选项应透传给 build_context。"""
+    captured = {}
+
+    def fake_build(question, top_k=5, min_score=0.0, max_context_chars=6000):
+        captured["max_context_chars"] = max_context_chars
+        return "ctx", ["a.py"]
+
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    monkeypatch.setattr(agent, "build_context", fake_build)
+    r = runner.invoke(agent.app, ["ask", "问题", "--max-context-chars", "1234"])
+    assert r.exit_code == 0
+    assert captured.get("max_context_chars") == 1234
 
 
 def test_search_command(monkeypatch, tmp_path):
@@ -160,7 +176,7 @@ def test_ask_reads_from_stdin(monkeypatch):
     monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
     captured = {}
 
-    def fake(q, top_k=5, min_score=0.0):
+    def fake(q, top_k=5, min_score=0.0, max_context_chars=6000):
         captured["q"] = q
         return "ctx", ["a.py"]
 
@@ -245,7 +261,7 @@ def test_ask_reads_question_from_file(monkeypatch, tmp_path):
     qfile.write_text("请解释依赖注入的实现细节")
     captured = {}
 
-    def fake(q, top_k=5, min_score=0.0):
+    def fake(q, top_k=5, min_score=0.0, max_context_chars=6000):
         captured["q"] = q
         return "ctx", ["a.py"]
 
@@ -268,7 +284,7 @@ def test_ask_save_writes_answer_file(monkeypatch, tmp_path):
 
     monkeypatch.setenv("MOCK_LLM", "1")
     monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
-    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("ctx", ["a.py"]))
     monkeypatch.setattr(agent.LLMClient, "complete", fake_complete)
     r = runner.invoke(agent.app, ["ask", "问题", "--save", str(out)])
     assert r.exit_code == 0
@@ -359,7 +375,7 @@ def test_ask_verbose_prints_retrieval_stats(monkeypatch):
     """R1 新需求验证：--verbose 打印检索概况。"""
     monkeypatch.setenv("MOCK_LLM", "1")
     monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
-    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("这是一段上下文内容", ["a.py", "b.py"]))
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("这是一段上下文内容", ["a.py", "b.py"]))
 
     def fake_complete(self, messages, context_files=None, system_prompt=None):
         return "答案"
@@ -376,7 +392,7 @@ def test_ask_no_hits_warns_ungrounded(monkeypatch):
     """R2 隐性问题验证：检索无命中时应告警，提示答案未接地。"""
     monkeypatch.setenv("MOCK_LLM", "1")
     monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
-    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("", []))
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("", []))
 
     def fake_complete(self, messages, context_files=None, system_prompt=None):
         return "答案"

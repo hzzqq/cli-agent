@@ -132,24 +132,38 @@ MAX_CONTEXT_CHARS = 6000
 MAX_BLOCK_CHARS = 2000
 
 
-def build_context(question: str, top_k: int = 5, min_score: float = 0.0) -> tuple[str, List[str]]:
-    """返回 (拼接好的上下文文本, 命中的文件路径列表)。
+def build_context(
+    question: str,
+    top_k: int = 5,
+    min_score: float = 0.0,
+    max_context_chars: int = MAX_CONTEXT_CHARS,
+    max_block_chars: int = MAX_BLOCK_CHARS,
+) -> tuple[str, List[str]]:
+    """返回 (拼接好的上下文文本, 实际进入上下文的文件路径列表)。
 
-    拼接受到 MAX_CONTEXT_CHARS 上限约束：一旦累计超过上限且已有内容，
+    拼接受到 max_context_chars 上限约束：一旦累计超过上限且已有内容，
     则停止追加后续文件（保证最相关的文件优先进入上下文）。
     每个块头部标注相关度分数，提升上下文可读性与可观测性。
+
+    R1 新增：max_context_chars / max_block_chars 可被调用方覆盖，
+    使 ask/context/chat 的 --max-context-chars 选项可调节上下文预算。
+
+    R2 修复（隐性可观测性缺陷）：此前 paths 返回的是「全部命中文件」，
+    但部分文件因预算上限被丢弃、并未真正进入上下文，导致 ask 的
+    「参考文件」列表与 --json 的 references、--verbose 命中数都虚高。
+    现改为只返回实际被加入上下文的文件路径（included_paths）。
     """
     hits = retrieve_scored(question, top_k=top_k, min_score=min_score)
-    paths = [e.path for e, _ in hits]
     if not hits:
         return "", []
     parts = []
     total = 0
+    included_paths: List[str] = []
     for e, score in hits:
         snippet = e.snippet
         truncated = False
-        if len(snippet) > MAX_BLOCK_CHARS:
-            snippet = snippet[:MAX_BLOCK_CHARS]
+        if len(snippet) > max_block_chars:
+            snippet = snippet[:max_block_chars]
             truncated = True
         block = (
             f"--- 文件: {e.path} (大小: {e.size} 字节, 相关度: {score:.2f}) ---\n"
@@ -158,8 +172,9 @@ def build_context(question: str, top_k: int = 5, min_score: float = 0.0) -> tupl
         if truncated:
             block += "\n...(该文件片段过长，已截断)"
         # 已有内容且加入会超上限时，停止（保留高相关片段）
-        if parts and total + len(block) > MAX_CONTEXT_CHARS:
+        if parts and total + len(block) > max_context_chars:
             break
         parts.append(block)
         total += len(block)
-    return "\n\n".join(parts), paths
+        included_paths.append(e.path)
+    return "\n\n".join(parts), included_paths

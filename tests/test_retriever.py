@@ -144,6 +144,40 @@ def test_build_context_labels_score(sample_index):
     assert "大小:" in text
 
 
+def test_build_context_returns_only_included_paths(tmp_path, monkeypatch):
+    """R2 修复验证：被预算上限丢弃的文件不应出现在返回路径里。"""
+    from index_store import IndexEntry, save_index
+
+    # small 相关度高（命中 foo），big 相关度低但内容极长，会被预算截断后丢弃
+    big = "y" * 4000
+    entries = [
+        IndexEntry(path="small.py", size=10, snippet="foo function"),
+        IndexEntry(path="big.py", size=9999, snippet=f"foo {big}"),
+    ]
+    save_index(entries, str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    text, paths = build_context("foo function", top_k=10, max_context_chars=1000)
+    assert "small.py" in paths  # 真正进入上下文
+    assert "big.py" not in paths  # 被预算丢弃的不得虚报为参考文件
+
+
+def test_build_context_max_context_chars_override(tmp_path, monkeypatch):
+    """R1 新需求验证：--max-context-chars 经 build_context 生效。"""
+    from index_store import IndexEntry, save_index
+    from retriever import MAX_CONTEXT_CHARS
+
+    entries = [
+        IndexEntry(path="a.py", size=10, snippet="foo " * 50),
+        IndexEntry(path="b.py", size=10, snippet="foo " * 50),
+    ]
+    save_index(entries, str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    text_default, _ = build_context("foo", top_k=10)
+    text_tiny, _ = build_context("foo", top_k=10, max_context_chars=50)
+    assert len(text_tiny) <= MAX_CONTEXT_CHARS  # 不超上限
+    assert len(text_tiny) < len(text_default)  # 更小的预算产出更短的上下文
+
+
 def test_search_index_finds_match(tmp_path):
     entries = [IndexEntry(path="foo.py", size=10, snippet="def hello(): pass")]
     save_index(entries, str(tmp_path))
