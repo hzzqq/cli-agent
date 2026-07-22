@@ -24,6 +24,7 @@ runner = CliRunner()
 
 def test_context_command_shows_refs(monkeypatch):
     """R1 新需求验证：context 命令只展示检索结果，不调用 LLM。"""
+    monkeypatch.setattr(agent, "load_index", lambda *a, **k: [1])
     monkeypatch.setattr(
         agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("这是一段上下文", ["a.py", "b.py"])
     )
@@ -34,10 +35,42 @@ def test_context_command_shows_refs(monkeypatch):
 
 
 def test_context_command_no_hit(monkeypatch):
+    # R2 回归：context 现已先做索引前置检查，需 mock load_index 使前置通过，
+    # 才能走到 build_context 返回空 -> 真正的「未检索到」分支。
+    monkeypatch.setattr(agent, "load_index", lambda *a, **k: [1])
     monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("", []))
     r = runner.invoke(agent.app, ["context", "无关问题"])
     assert r.exit_code == 1
     assert "未检索到" in r.stdout
+
+
+def test_context_command_json(monkeypatch):
+    """R1 新需求验证：context --json 输出结构化 {context, files}。"""
+    monkeypatch.setattr(agent, "load_index", lambda *a, **k: [1])
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("这是一段上下文", ["a.py", "b.py"]))
+    r = runner.invoke(agent.app, ["context", "问题", "--json"])
+    assert r.exit_code == 0
+    data = _json.loads(r.stdout)
+    assert data["context"] == "这是一段上下文"
+    assert data["files"] == ["a.py", "b.py"]
+
+
+def test_explain_command_json(monkeypatch):
+    """R1 新需求验证：explain --json 输出结构化解释数组。"""
+    monkeypatch.setattr(agent, "load_index", lambda *a, **k: [1])
+
+    def fake_explain(q, top_k=5, min_score=0.0):
+        return [{"path": "a.py", "score": 0.91, "terms": ["foo"]},
+                {"path": "b.py", "score": 0.33, "terms": ["bar"]}]
+
+    monkeypatch.setattr(retriever, "explain_retrieval", fake_explain)
+    r = runner.invoke(agent.app, ["explain", "foo问题", "--json"])
+    assert r.exit_code == 0
+    data = _json.loads(r.stdout)
+    assert isinstance(data, list) and len(data) == 2
+    assert data[0]["path"] == "a.py"
+    assert data[0]["score"] == 0.91
+    assert data[0]["terms"] == ["foo"]
 
 
 def test_ask_handles_llm_error_gracefully(monkeypatch):

@@ -375,15 +375,26 @@ def context(
     top_k: int = typer.Option(5, "--top-k", "-k", help="召回的相关文件数量"),
     min_score: float = typer.Option(0.0, "--min-score", help="最低相关度阈值，过滤弱相关文件"),
     max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符）"),
+    as_json: bool = typer.Option(False, "--json", help="以 JSON 输出检索上下文与参考文件，便于脚本消费"),
 ):
     """仅展示检索到的上下文与参考文件（不调用 LLM）。
 
     便于排查检索质量、核对参考来源，或在不想消耗 LLM 额度时预览。
     """
+    # R2 修复（隐性诊断缺陷）：原实现直接调用 build_context，在无索引时
+    # 会误报「未检索到相关文件」，与「索引未建/已损坏」的真实原因混淆。
+    # 现先经 _require_index 区分，与 ask/explain 等命令保持一致的诊断口径。
+    if not _require_index():
+        raise typer.Exit(code=1)
     text, paths = build_context(question, top_k=top_k, min_score=min_score, max_context_chars=max_context_chars)
     if not paths:
-        typer.echo("🔎 未检索到相关文件，请确认索引已建立且问题与仓库内容相关。")
+        typer.echo("🔎 未检索到相关文件，请确认问题与仓库内容相关。")
         raise typer.Exit(code=1)
+    if as_json:
+        # R1 新能力：机读输出上下文与参考文件，与 search/files/related 对齐
+        payload = {"context": text, "files": paths}
+        typer.echo(_json.dumps(payload, ensure_ascii=False, indent=2))
+        return
     typer.echo(f"🔎 召回 {len(paths)} 个文件，上下文长度 {len(text)} 字符：")
     for p in paths:
         typer.echo(f"  - {p}")
@@ -397,6 +408,7 @@ def explain(
     question: str = typer.Argument(..., help="要解释检索的问题，用引号包裹"),
     top_k: int = typer.Option(5, "--top-k", "-k", help="召回的相关文件数量"),
     min_score: float = typer.Option(0.0, "--min-score", help="最低相关度阈值，过滤弱相关文件"),
+    as_json: bool = typer.Option(False, "--json", help="以 JSON 数组输出检索解释，便于脚本消费"),
 ):
     """展示「为什么召回了这些文件」：命中文件 + 相关度 + 命中关键词（不调用 LLM）。
 
@@ -411,6 +423,14 @@ def explain(
     if not hits:
         typer.echo("🔎 未检索到相关文件，请确认索引已建立且问题与仓库内容相关。")
         raise typer.Exit(code=1)
+    if as_json:
+        # R1 新能力：机读输出检索解释，与 search/files/related 对齐
+        payload = [
+            {"path": h["path"], "score": round(h["score"], 4), "terms": h["terms"]}
+            for h in hits
+        ]
+        typer.echo(_json.dumps(payload, ensure_ascii=False, indent=2))
+        return
     typer.echo(f"🔎 针对问题「{question}」共召回 {len(hits)} 个文件：")
     for h in hits:
         terms = "、".join(h["terms"]) or "（无显式关键词匹配）"
