@@ -95,3 +95,28 @@ def test_search_command_no_hit(tmp_path):
     r = runner.invoke(agent.app, ["search", "nomatch", "--root", str(tmp_path)])
     assert r.exit_code == 1
     assert "未找到" in r.stdout
+
+
+def test_ask_reads_from_stdin(monkeypatch):
+    """R1 新需求验证：省略参数时从管道(stdin)读取问题。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    captured = {}
+
+    def fake(q, top_k=5, min_score=0.0):
+        captured["q"] = q
+        return "ctx", ["a.py"]
+
+    monkeypatch.setattr(agent, "build_context", fake)
+    r = runner.invoke(agent.app, ["ask"], input="来自管道的问题\n")
+    assert r.exit_code == 0
+    assert captured.get("q") == "来自管道的问题"
+    assert "MOCK" in r.stdout
+
+
+def test_ask_empty_question_errors(monkeypatch):
+    """R2 隐式问题验证：空问题不应无效调用 LLM，应友好报错。"""
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    r = runner.invoke(agent.app, ["ask"], input="")
+    assert r.exit_code == 1
+    assert "不能为空" in (r.stderr or r.stdout)

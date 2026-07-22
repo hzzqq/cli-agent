@@ -110,7 +110,7 @@ def index(
 
 @app.command()
 def ask(
-    question: str = typer.Argument(..., help="要问的问题，用引号包裹"),
+    question: Optional[str] = typer.Argument(None, help="要问的问题，用引号包裹；省略则从标准输入(管道)读取"),
     top_k: int = typer.Option(5, "--top-k", "-k", help="召回的相关文件数量"),
     min_score: float = typer.Option(0.0, "--min-score", help="最低相关度阈值，过滤弱相关文件"),
     model: Optional[str] = typer.Option(None, "--model", help="指定模型名称"),
@@ -119,6 +119,12 @@ def ask(
     as_json: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
 ):
     """基于索引检索相关文件并调用 LLM 作答。"""
+    # 省略位置参数时，尝试从标准输入读取（管道场景）
+    if not question and not sys.stdin.isatty():
+        question = sys.stdin.read().strip()
+    if not question:
+        typer.echo("⚠️ 问题不能为空（可传入参数，或用管道提供：echo '问题' | python agent.py ask）", err=True)
+        raise typer.Exit(code=1)
     if not _require_index():
         raise typer.Exit(code=1)
     cfg = _build_config(model, base_url, api_key)
