@@ -710,3 +710,37 @@ def test_index_json_output(monkeypatch, tmp_path):
     assert data["index_path"].endswith(".cliagent_index.json")
     reasons = {s["reason"] for s in data["skipped"]}
     assert "unsupported_ext" in reasons
+
+
+def test_config_check_invokes_health(monkeypatch):
+    """R1 新需求验证：config --check 调用 health 探针并打印可用性。"""
+    captured = {}
+
+    def fake_health(self):
+        captured["called"] = True
+        return {"ok": True, "mock": True, "model": "x", "attempts": 0, "error": None}
+
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent.LLMClient, "health", fake_health)
+    r = runner.invoke(agent.app, ["config", "--check"])
+    assert r.exit_code == 0
+    assert captured.get("called")
+    assert "可用" in r.stdout
+
+
+def test_config_check_json(monkeypatch):
+    """R1 验证：config --check --json 输出含 health 的结构化 JSON。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    r = runner.invoke(agent.app, ["config", "--check", "--json"])
+    assert r.exit_code == 0
+    data = _json.loads(r.stdout)
+    assert "health" in data and data["health"]["ok"] is True
+
+
+def test_config_save_warns_plaintext_api_key(monkeypatch, tmp_path):
+    """R2 验证：--save 写入 api_key 时告警明文凭证风险（不静默落盘）。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(agent, "_save_file_config", lambda cfg: None)  # 避免真写盘
+    r = runner.invoke(agent.app, ["config", "--api-key", "secret123", "--save"])
+    assert r.exit_code == 0
+    assert "明文" in (r.stderr or r.stdout)  # 告警明文存储

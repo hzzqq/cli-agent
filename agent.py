@@ -575,16 +575,62 @@ def config(
     base_url: Optional[str] = typer.Option(None, "--base-url", help="覆盖 API 地址（仅用于预览生效值/持久化）"),
     api_key: Optional[str] = typer.Option(None, "--api-key", help="覆盖 API Key（仅用于预览生效值/持久化）"),
     save: bool = typer.Option(False, "--save", help="把当前生效配置写入 .cliagent_config.json，供后续运行复用"),
+    check: bool = typer.Option(False, "--check", help="探测 LLM 端点可用性（调用 health 探针，离线 mock 模式直接返回可用）"),
+    as_json: bool = typer.Option(False, "--json", help="以 JSON 输出配置 / 健康状态，便于脚本消费"),
 ):
     """展示当前生效的 LLM 配置（环境变量/配置文件/默认值合并后的结果，可观测性）。
 
     R1 新能力：加 --save 可把当前生效配置持久化到 .cliagent_config.json，
     后续 ask/chat/index 将自动读取，无需每次重复敲 --model/--base-url/--api-key。
+    加 --check 可探测 LLM 端点是否可用（health 探针）；--json 输出结构化结果。
     """
     cfg = _build_config(model, base_url, api_key) or LLMConfig()
+    if check:
+        # R1 新能力：端点健康探针，快速判断当前配置能否真正调用 LLM
+        health = LLMClient(cfg).health()
+        if as_json:
+            out = {
+                "config": {
+                    "base_url": cfg.base_url,
+                    "model": cfg.model,
+                    "mock": cfg.mock,
+                    "timeout": cfg.timeout,
+                    "max_tokens": cfg.max_tokens,
+                    "temperature": cfg.temperature,
+                    "api_key_set": bool(cfg.api_key),
+                },
+                "health": health,
+            }
+            typer.echo(_json.dumps(out, ensure_ascii=False, indent=2))
+            return
+        typer.echo("🔌 LLM 端点探测：")
+        typer.echo(f"  状态   : {'✅ 可用' if health['ok'] else '❌ 不可用'}")
+        typer.echo(f"  模式   : {'mock' if health['mock'] else '真实'}")
+        typer.echo(f"  模型   : {health['model']}")
+        if health["error"]:
+            typer.echo(f"  错误   : {health['error']}")
     if save:
         _save_file_config(cfg)
+        # R2 安全/可观测性：配置文件以明文保存 api_key，提示用户注意权限与泄露风险
+        if cfg.api_key:
+            typer.echo(
+                "⚠️ 警告：配置文件将以明文保存 api_key，请注意文件权限与泄露风险"
+                "（建议 chmod 600 或仅保存在可信环境）。",
+                err=True,
+            )
         typer.echo(f"💾 配置已保存到 {CONFIG_FILE}（后续运行将自动读取）")
+    if as_json and not check:
+        out = {
+            "base_url": cfg.base_url,
+            "model": cfg.model,
+            "mock": cfg.mock,
+            "timeout": cfg.timeout,
+            "max_tokens": cfg.max_tokens,
+            "temperature": cfg.temperature,
+            "api_key_set": bool(cfg.api_key),
+        }
+        typer.echo(_json.dumps(out, ensure_ascii=False, indent=2))
+        return
     typer.echo("⚙️  当前 LLM 配置（环境变量 + 配置文件 + 默认值合并后）：")
     typer.echo(f"  base_url   : {cfg.base_url}")
     typer.echo(f"  model      : {cfg.model}")
