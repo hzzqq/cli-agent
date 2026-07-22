@@ -185,3 +185,58 @@ def test_health_real_fail(fake_client):
     c = LLMClient(LLMConfig(mock=False, retries=1, backoff=0))
     h = c.health()
     assert h["ok"] is False and h["error"] is not None
+
+
+def test_trim_messages_under_budget():
+    """R2 隐性问题验证：预算充裕时不应裁剪任何消息。"""
+    msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+    out, trimmed = LLMClient.trim_messages_to_budget(msgs, 1000)
+    assert out == msgs and trimmed is False
+
+
+def test_trim_messages_over_budget_keeps_last():
+    """R2 验证：超出预算时丢弃最旧消息，但保留最后一条对话消息。"""
+    msgs = [{"role": "user", "content": "x" * 5000} for _ in range(4)]
+    out, trimmed = LLMClient.trim_messages_to_budget(msgs, 10)
+    assert trimmed is True
+    assert len(out) == 1
+    assert out[0]["content"] == "x" * 5000
+
+
+def test_trim_messages_preserves_system():
+    """R2 验证：system 提示始终优先保留，即便其自身已占满预算。"""
+    msgs = [{"role": "system", "content": "sys" * 5000}] + [
+        {"role": "user", "content": "x" * 5000} for _ in range(3)
+    ]
+    out, trimmed = LLMClient.trim_messages_to_budget(msgs, 10)
+    assert out[0]["role"] == "system"
+    assert any(m["role"] == "system" for m in out)
+
+
+def test_complete_trims_oversized_history(monkeypatch):
+    """R2 隐性问题验证：超大历史在发送前被裁剪到预算内，避免上下文溢出 400。"""
+    captured = {}
+
+    class _Compl:
+        def create(self, **kw):
+            captured["messages"] = kw["messages"]
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+
+    class _Chat:
+        completions = _Compl()
+
+    class _Client:
+        chat = _Chat()
+
+    monkeypatch.setattr(LLMClient, "_get_client", lambda self: _Client())
+    c = LLMClient(LLMConfig(mock=False, max_context_tokens=10))
+    big = [{"role": "user", "content": "x" * 2000} for _ in range(5)]
+    out = c.complete(big)
+    assert out == "ok"
+    msgs = captured["messages"]
+    # system 提示 + 仅剩的最后一条 user 消息（其余被裁掉）
+    assert msgs[0]["role"] == "system"
+    assert len(msgs) == 2

@@ -30,6 +30,7 @@ DEFAULT_MAX_TOKENS = 1024
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_RETRIES = 1           # 瞬态错误的重试次数（不含首次）
 DEFAULT_BACKOFF = 0.2         # 指数退避基延迟（秒）
+DEFAULT_MAX_CONTEXT_TOKENS = 12000  # 发送给模型的历史 token 预算上限（防上下文溢出）
 
 # 判定为「值得重试」的瞬态错误关键词（网络抖动 / 限流 / 5xx）
 _TRANSIENT_KEYWORDS = (
@@ -54,6 +55,9 @@ class LLMConfig:
     temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", str(DEFAULT_TEMPERATURE))))
     retries: int = field(default_factory=lambda: int(os.getenv("LLM_RETRIES", str(DEFAULT_RETRIES))))
     backoff: float = field(default_factory=lambda: float(os.getenv("LLM_BACKOFF", str(DEFAULT_BACKOFF))))
+    max_context_tokens: int = field(
+        default_factory=lambda: int(os.getenv("LLM_MAX_CONTEXT_TOKENS", str(DEFAULT_MAX_CONTEXT_TOKENS)))
+    )
 
 
 class LLMClient:
@@ -82,6 +86,33 @@ class LLMClient:
         cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
         others = len(text) - cjk
         return cjk + (others + 3) // 4
+
+    @staticmethod
+    def trim_messages_to_budget(messages: List[dict], max_tokens: int) -> "tuple[List[dict], bool]":
+        """把消息列表裁剪到 token 预算内，避免超大历史触发模型上下文溢出（400 错误）。
+
+        隐性问题：chat 多轮累积后，拼上 system 提示的 messages 可能远超模型
+        context window，直接抛 400 且错误信息晦涩、用户无从定位。这里在发送前
+        按预算裁剪——始终保留 system 消息（系统提示优先级最高），超出时从最旧的
+        user/assistant 消息开始丢弃，直到满足预算或仅剩最后一条非 system 消息
+        （保证至少有一条用户/助手内容可被模型消费）。
+
+        返回 (裁剪后的列表, 是否发生过裁剪)。max_tokens<=0 视为不限制。
+        """
+        if max_tokens <= 0:
+            return list(messages), False
+        msgs = list(messages)
+        est = sum(LLMClient.estimate_tokens(m.get("content", "") or "") for m in msgs)
+        if est <= max_tokens:
+            return msgs, False
+        system_msgs = [m for m in msgs if m.get("role") == "system"]
+        rest = [m for m in msgs if m.get("role") != "system"]
+        while len(rest) > 1:
+            est = sum(LLMClient.estimate_tokens(m.get("content", "") or "") for m in system_msgs + rest)
+            if est <= max_tokens:
+                break
+            rest.pop(0)  # 丢弃最旧的对话消息，保留更近的上下文
+        return system_msgs + rest, True
 
     @staticmethod
     def _validate_messages(messages: List[dict]) -> None:
@@ -154,6 +185,9 @@ class LLMClient:
             "用中文准确、简洁地回答用户的问题。如果上下文不足以回答，请如实说明。"
         )
         full = [{"role": "system", "content": sys_prompt}] + list(messages)
+        # R2 隐性问题修复：超大历史会撑爆上下文窗口导致晦涩的 400 错误，
+        # 发送前按 token 预算裁剪（保留 system 与最近的对话）。
+        full, _trimmed = LLMClient.trim_messages_to_budget(full, self.config.max_context_tokens)
 
         client = self._get_client()
         message = ""
@@ -231,6 +265,9 @@ class LLMClient:
             "用中文准确、简洁地回答用户的问题。如果上下文不足以回答，请如实说明。"
         )
         full = [{"role": "system", "content": sys_prompt}] + list(messages)
+        # R2 隐性问题修复：与 complete 一致，流式发送前也按 token 预算裁剪，
+        # 避免超大历史触发模型上下文溢出。
+        full, _trimmed = LLMClient.trim_messages_to_budget(full, self.config.max_context_tokens)
         client = self._get_client()
         try:
             stream = client.chat.completions.create(
