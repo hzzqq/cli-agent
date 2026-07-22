@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 from typing import List
 
 from index_store import IndexEntry, load_index
@@ -64,6 +65,9 @@ def retrieve_scored(question: str, top_k: int = 5, min_score: float = 0.0):
 
     返回 [(entry, score), ...] 按分数降序。min_score 用于过滤弱相关命中
     （隐性问题：无阈值会把噪声文件一并送入 LLM 上下文，拉低回答质量）。
+    查询侧使用词频（Counter）加权：重复同一关键词会使相关文件得分更高，
+    修复此前用 set(q_tokens) 丢弃查询词频、导致「python python」与
+    「python」权重相同的隐性打分缺陷。
     """
     entries = load_index()
     if not entries:
@@ -76,6 +80,7 @@ def retrieve_scored(question: str, top_k: int = 5, min_score: float = 0.0):
     q_tokens = _tokenize(question)
     if not q_tokens:
         return []
+    q_freq = Counter(q_tokens)  # 查询侧词频：修复 set 丢弃词频的隐性打分缺陷
 
     scored = []
     for entry, toks in docs:
@@ -83,13 +88,13 @@ def retrieve_scored(question: str, top_k: int = 5, min_score: float = 0.0):
         for t in toks:
             tf[t] = tf.get(t, 0) + 1
         score = 0.0
-        for qt in set(q_tokens):
+        for qt, qf in q_freq.items():
             if qt not in tf:
                 continue
             if qt not in idf_cache:
                 idf_cache[qt] = _idf(qt, docs_tokens)
-            # 简单 TF-IDF
-            score += (tf[qt] / max(len(toks), 1)) * idf_cache[qt]
+            # TF-IDF（含查询侧词频 qf）：重复提问同一关键词时该文件得分更高
+            score += qf * (tf[qt] / max(len(toks), 1)) * idf_cache[qt]
         if score >= min_score:
             scored.append((score, entry))
 
@@ -100,6 +105,25 @@ def retrieve_scored(question: str, top_k: int = 5, min_score: float = 0.0):
 def retrieve(question: str, top_k: int = 5, min_score: float = 0.0) -> List[IndexEntry]:
     """根据问题召回 top-K 相关文件。找不到索引时返回空列表。"""
     return [e for e, _ in retrieve_scored(question, top_k=top_k, min_score=min_score)]
+
+
+def explain_retrieval(question: str, top_k: int = 5, min_score: float = 0.0) -> List[dict]:
+    """返回每篇命中文件的匹配关键词与分数，便于排查检索质量（透明性 / 可观测）。
+
+    返回 [{"path": str, "score": float, "terms": List[str]}, ...]，
+    供 context 命令或外部工具展示「为什么召回了这些文件」。
+    """
+    hits = retrieve_scored(question, top_k=top_k, min_score=min_score)
+    q_set = set(_tokenize(question))
+    out: List[dict] = []
+    for e, score in hits:
+        doc_tokens = set(_tokenize(f"{e.path}\n{e.snippet}"))
+        out.append({
+            "path": e.path,
+            "score": score,
+            "terms": sorted(q_set & doc_tokens),
+        })
+    return out
 
 
 # 上下文拼接上限（字符），防止超大仓库把所有片段塞进 prompt 撑爆 LLM 上下文

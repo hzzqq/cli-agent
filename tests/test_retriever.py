@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from index_store import INDEX_FILE, IndexEntry, save_index, load_index, search_index, prune_missing  # noqa: E402
-from retriever import MAX_CONTEXT_CHARS, _tokenize, build_context, retrieve  # noqa: E402
+from retriever import MAX_CONTEXT_CHARS, _tokenize, build_context, retrieve, retrieve_scored, explain_retrieval  # noqa: E402
 
 
 @pytest.fixture
@@ -155,6 +155,34 @@ def test_search_index_no_keyword(tmp_path):
     entries = [IndexEntry(path="foo.py", size=10, snippet="def hello(): pass")]
     save_index(entries, str(tmp_path))
     assert search_index("", str(tmp_path / INDEX_FILE)) == []
+
+
+def test_query_term_frequency_boosts(tmp_path, monkeypatch):
+    """R2 隐性打分缺陷验证：重复查询词应加权（修复 set 丢弃词频）。"""
+    entries = [
+        IndexEntry(path="py.py", size=30, snippet="python python python python"),
+        IndexEntry(path="jv.py", size=10, snippet="java"),
+    ]
+    save_index(entries, str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    s_once = retrieve_scored("python", top_k=5)[0][1]
+    s_twice = retrieve_scored("python python", top_k=5)[0][1]
+    assert s_twice > s_once  # 「python python」比「python」更强调，得分应更高
+
+
+def test_explain_retrieval_returns_terms(tmp_path, monkeypatch):
+    """R1 新需求验证：explain_retrieval 返回命中文件与匹配关键词（透明性）。"""
+    entries = [IndexEntry(path="a.py", size=10, snippet="def foo(): pass")]
+    save_index(entries, str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    expl = explain_retrieval("foo", top_k=5)
+    assert expl and expl[0]["path"] == "a.py"
+    assert "foo" in expl[0]["terms"]
+
+
+def test_explain_retrieval_empty_on_no_index(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert explain_retrieval("anything") == []
 
 
 def test_prune_missing_removes_gone_file(tmp_path):
