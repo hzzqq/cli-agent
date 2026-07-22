@@ -217,3 +217,59 @@ def test_prune_command_clean(tmp_path):
     r = runner.invoke(agent.app, ["prune", "--root", str(tmp_path)])
     assert r.exit_code == 0
     assert "无需清理" in r.stdout
+
+
+def test_ask_no_context_bypasses_index_requirement(monkeypatch):
+    """R2 隐性问题验证：--no-context 下不应强制要求建索引，纯问题也能提问。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    # 关键：load_index 返回空（无索引），但 --no-context 应跳过该检查
+    monkeypatch.setattr(agent, "load_index", lambda *a, **k: [])
+    r = runner.invoke(agent.app, ["ask", "什么是闭包", "--no-context"])
+    assert r.exit_code == 0
+    assert "MOCK" in r.stdout
+    assert "未使用仓库上下文" in r.stdout
+
+
+def test_ask_no_context_still_requires_question(monkeypatch):
+    """--no-context 不绕过「问题为空」的校验。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda *a, **k: [])
+    r = runner.invoke(agent.app, ["ask", "--no-context"], input="")
+    assert r.exit_code == 1
+    assert "不能为空" in (r.stderr or r.stdout)
+
+
+def test_ask_reads_question_from_file(monkeypatch, tmp_path):
+    """R1 新需求验证：--file 从文件读取问题（优先于位置参数）。"""
+    qfile = tmp_path / "q.txt"
+    qfile.write_text("请解释依赖注入的实现细节")
+    captured = {}
+
+    def fake(q, top_k=5, min_score=0.0):
+        captured["q"] = q
+        return "ctx", ["a.py"]
+
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    monkeypatch.setattr(agent, "build_context", fake)
+    r = runner.invoke(agent.app, ["ask", "--file", str(qfile)])
+    assert r.exit_code == 0
+    assert captured.get("q") == "请解释依赖注入的实现细节"
+
+
+def test_ask_save_writes_answer_file(monkeypatch, tmp_path):
+    """R1 新需求验证：--save 把答案写入文件。"""
+    out = tmp_path / "answer.md"
+    captured = {}
+
+    def fake_complete(self, messages, context_files=None, system_prompt=None):
+        captured["answer"] = "这是答案"
+        return "这是答案"
+
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent.LLMClient, "complete", fake_complete)
+    r = runner.invoke(agent.app, ["ask", "问题", "--save", str(out)])
+    assert r.exit_code == 0
+    assert out.read_text(encoding="utf-8") == "这是答案"

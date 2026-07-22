@@ -86,8 +86,14 @@ def _do_ask(
     min_score: float = 0.0,
     history: "list[dict] | None" = None,
     system_prompt: Optional[str] = None,
+    no_context: bool = False,
+    save_path: Optional[str] = None,
 ):
-    context_text, paths = build_context(question, top_k=top_k, min_score=min_score)
+    # 隐性问题：--no-context 下不应再强制检索，否则会为「纯通用问题」无谓加载索引
+    if no_context:
+        context_text, paths = "", []
+    else:
+        context_text, paths = build_context(question, top_k=top_k, min_score=min_score)
     client = LLMClient(config)
     # 多轮时把历史 + 当前问题（含检索上下文）组装成 messages 传给 complete，
     # 使 chat 真正具备「多轮记忆」，而非每轮只看当前问题（隐性正确性缺陷）。
@@ -104,7 +110,7 @@ def _do_ask(
         typer.echo(f"⚠️ 调用 LLM 失败：{exc}", err=True)
         raise typer.Exit(code=1)
     if as_json:
-        out = {"question": question, "answer": answer, "references": paths}
+        out = {"question": question, "answer": answer, "references": paths, "no_context": no_context}
         typer.echo(_json.dumps(out, ensure_ascii=False, indent=2))
     else:
         typer.echo(answer)
@@ -112,6 +118,16 @@ def _do_ask(
             typer.echo("\n📚 参考文件：")
             for p in paths:
                 typer.echo(f"  - {p}")
+        elif no_context:
+            typer.echo("\nℹ️  未使用仓库上下文（--no-context）")
+    # R1 新能力：把答案落盘，便于脚本化消费与归档
+    if save_path:
+        try:
+            Path(save_path).write_text(answer, encoding="utf-8")
+            typer.echo(f"\n💾 答案已保存至：{save_path}")
+        except OSError as exc:
+            typer.echo(f"⚠️ 无法写入答案文件：{exc}", err=True)
+            raise typer.Exit(code=1)
     return answer
 
 
@@ -152,7 +168,7 @@ def index(
 
 @app.command()
 def ask(
-    question: Optional[str] = typer.Argument(None, help="要问的问题，用引号包裹；省略则从标准输入(管道)读取"),
+    question: Optional[str] = typer.Argument(None, help="要问的问题，用引号包裹；省略则从 --file 或标准输入(管道)读取"),
     top_k: int = typer.Option(5, "--top-k", "-k", help="召回的相关文件数量"),
     min_score: float = typer.Option(0.0, "--min-score", help="最低相关度阈值，过滤弱相关文件"),
     model: Optional[str] = typer.Option(None, "--model", help="指定模型名称"),
@@ -161,19 +177,32 @@ def ask(
     as_json: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
     system_prompt: Optional[str] = typer.Option(None, "--system-prompt", help="自定义系统提示（内联），覆盖默认助手提示"),
     system_prompt_file: Optional[str] = typer.Option(None, "--system-prompt-file", help="从文件读取系统提示（优先于 --system-prompt）"),
+    no_context: bool = typer.Option(False, "--no-context", help="跳过仓库检索，直接把问题交给 LLM（适用于无需代码上下文的通用问题）"),
+    question_file: Optional[str] = typer.Option(None, "--file", help="从文件读取问题（支持长/多行问题，优先于位置参数与管道）"),
+    save_path: Optional[str] = typer.Option(None, "--save", help="把答案写入指定文件（便于脚本化消费/归档）"),
 ):
     """基于索引检索相关文件并调用 LLM 作答。"""
-    # 省略位置参数时，尝试从标准输入读取（管道场景）
+    # 问题来源优先级：--file > 位置参数 > 管道（stdin）
+    if question_file:
+        try:
+            question = Path(question_file).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            typer.echo(f"⚠️ 无法读取问题文件：{exc}", err=True)
+            raise typer.Exit(code=1)
     if not question and not sys.stdin.isatty():
         question = sys.stdin.read().strip()
     if not question:
-        typer.echo("⚠️ 问题不能为空（可传入参数，或用管道提供：echo '问题' | python agent.py ask）", err=True)
+        typer.echo("⚠️ 问题不能为空（可传入参数，或 --file 提供，或用管道：echo '问题' | python agent.py ask）", err=True)
         raise typer.Exit(code=1)
-    if not _require_index():
+    # 隐性问题：索引要求是「检索」的前置条件；--no-context 下无需索引也应允许提问
+    if not no_context and not _require_index():
         raise typer.Exit(code=1)
     cfg = _build_config(model, base_url, api_key)
     sp = _resolve_system_prompt(system_prompt, system_prompt_file)
-    _do_ask(question, top_k, config=cfg, as_json=as_json, min_score=min_score, system_prompt=sp)
+    _do_ask(
+        question, top_k, config=cfg, as_json=as_json, min_score=min_score,
+        system_prompt=sp, no_context=no_context, save_path=save_path,
+    )
 
 
 @app.command()
@@ -277,9 +306,10 @@ def chat(
     api_key: Optional[str] = typer.Option(None, "--api-key", help="指定 API Key"),
     system_prompt: Optional[str] = typer.Option(None, "--system-prompt", help="自定义系统提示（内联），覆盖默认助手提示"),
     system_prompt_file: Optional[str] = typer.Option(None, "--system-prompt-file", help="从文件读取系统提示（优先于 --system-prompt）"),
+    no_context: bool = typer.Option(False, "--no-context", help="跳过仓库检索，每轮直接把问题交给 LLM（纯通用对话）"),
 ):
     """进入交互式多轮对话，每轮都带上检索到的上下文。输入 exit/quit 退出。"""
-    if not _require_index():
+    if not no_context and not _require_index():
         raise typer.Exit(code=1)
     cfg = _build_config(model, base_url, api_key)
     sp = _resolve_system_prompt(system_prompt, system_prompt_file)
@@ -296,7 +326,7 @@ def chat(
         if question.lower() in ("exit", "quit", "q"):
             typer.echo("👋 再见。")
             break
-        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp)
+        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context)
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": answer})
         typer.echo("")
