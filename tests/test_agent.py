@@ -564,3 +564,33 @@ def test_related_command_missing_file(tmp_path, monkeypatch):
     r = runner.invoke(agent.app, ["related", "nope.py"])
     assert r.exit_code == 1
     assert "文件不存在" in r.stdout
+
+
+def test_chat_save_writes_transcript(tmp_path, monkeypatch):
+    """R1 新需求验证：chat --save 在退出时把整段对话转录为 Markdown 落盘。"""
+    from index_store import IndexEntry
+
+    transcript = tmp_path / "transcript.md"
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(
+        agent, "load_index",
+        lambda *a, **k: [IndexEntry(path="a.py", size=1, snippet="x")],
+    )
+    r = runner.invoke(
+        agent.app, ["chat", "--save", str(transcript), "--no-context"],
+        input="第一轮\n第二轮\nexit\n",
+    )
+    assert r.exit_code == 0, r.stdout
+    assert transcript.exists()
+    text = transcript.read_text(encoding="utf-8")
+    assert "# cli-agent 对话转录" in text
+    assert "第一轮" in text
+    assert "第二轮" in text
+
+
+def test_index_missing_path_fails_fast(tmp_path):
+    """R2 隐性可观测性验证：索引目标路径不存在时应快速失败（而非静默建空索引）。"""
+    missing = tmp_path / "does_not_exist_dir"
+    r = runner.invoke(agent.app, ["index", str(missing)])
+    assert r.exit_code == 1
+    assert "不存在或不是目录" in (r.stderr or r.stdout)

@@ -205,6 +205,12 @@ def index(
     ),
 ):
     """递归遍历目录，建立文本文件索引。"""
+    # R2 修复（隐性可观测性/失败快速）：原实现对不存在的目录静默执行，
+    # os.walk 在缺失目录上不报错、只返回 0 个文件，用户误以为索引成功、
+    # 却得到空索引并在后续 ask 时困惑「为何检索不到」。现显式区分并快速失败。
+    if not os.path.isdir(path):
+        typer.echo(f"⚠️ 索引目标路径不存在或不是目录：{path}", err=True)
+        raise typer.Exit(code=1)
     exts = None
     if ext:
         exts = {e.strip().lower() for e in ext.split(",") if e.strip()}
@@ -540,6 +546,27 @@ def files(
         typer.echo(f"  - [{e.size} B] {e.path}")
 
 
+def _save_transcript(path: "Optional[str]", history: "list[dict]") -> None:
+    """把对话历史写出为 Markdown 转录文件（便于归档 / 分享 / 后续检索）。
+
+    失败（路径不可写等）只告警不中断对话，避免「悄无声息丢转录」。
+    """
+    if not path or not history:
+        return
+    try:
+        lines = ["# cli-agent 对话转录", ""]
+        role_label = {"user": "## 你", "assistant": "## 助手", "system": "## 系统"}
+        for m in history:
+            role = m.get("role", "")
+            lines.append(role_label.get(role, f"## {role}"))
+            lines.append("")
+            lines.append(m.get("content", ""))
+            lines.append("")
+        Path(path).write_text("\n".join(lines), encoding="utf-8")
+    except OSError as exc:
+        typer.echo(f"⚠️ 对话转录保存失败（{path}）：{exc}", err=True)
+
+
 @app.command()
 def chat(
     top_k: int = typer.Option(5, "--top-k", "-k", help="每轮召回的相关文件数量"),
@@ -554,6 +581,7 @@ def chat(
         no_stream: bool = typer.Option(False, "--no-stream", help="关闭流式输出，等生成完毕后一次性打印"),
         explain: bool = typer.Option(False, "--explain", "-e", help="每轮打印检索解释（命中文件+相关度+命中词）"),
         session_file: Optional[str] = typer.Option(None, "--session", help="对话历史持久化文件（JSON）：进入时载入、每轮后保存，支持跨重启续聊"),
+        save_file: Optional[str] = typer.Option(None, "--save", help="把整段对话转录为 Markdown 保存到该文件（退出时落盘）"),
 ):
     """进入交互式多轮对话，每轮都带上检索到的上下文。输入 exit/quit 退出。"""
     if not no_context and not _require_index():
@@ -570,6 +598,8 @@ def chat(
             typer.echo("\n👋 再见。")
             if session_file:
                 save_session(session_file, history)
+            if save_file:
+                _save_transcript(save_file, history)
             break
         if not question:
             continue
@@ -577,6 +607,8 @@ def chat(
             typer.echo("👋 再见。")
             if session_file:
                 save_session(session_file, history)
+            if save_file:
+                _save_transcript(save_file, history)
             break
         answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context, verbose=verbose, max_context_chars=max_context_chars, stream=not no_stream, explain=explain)
         history.append({"role": "user", "content": question})
