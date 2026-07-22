@@ -27,11 +27,20 @@ from index_store import build_index, save_index, load_index, INDEX_FILE
 from retriever import build_context
 from llm_client import LLMClient, LLMConfig, LLMError
 
+# 版本号：随每次功能性迭代递增，便于用户/脚本识别 CLI 能力级别。
+VERSION = "1.0.0"
+
 
 app = typer.Typer(
     help="垂直代码库问答 CLI 智能体：index 建索引，ask 单轮问答，chat 多轮对话。",
     no_args_is_help=True,
 )
+
+
+@app.command()
+def version():
+    """打印 cli-agent 版本号（便于脚本化识别与问题排查）。"""
+    typer.echo(f"cli-agent {VERSION}")
 
 
 def _require_index() -> bool:
@@ -328,14 +337,23 @@ def load_session(path: "Optional[str]") -> "list[dict]":
 
 
 def save_session(path: "Optional[str]", history: "list[dict]") -> None:
-    """把对话历史写入 JSON 文件（多轮会话持久化）。失败静默，不阻断对话。"""
+    """把对话历史写入 JSON 文件（多轮会话持久化）。
+
+    R2 修复（隐性健壮性问题）：原实现直接 open(path, "w")，当父目录不存在时
+    会触发 FileNotFoundError 被静默吞掉——用户以为会话已落盘，重启后却发现
+    历史丢失且无任何提示。现改为：自动创建父目录；若仍写入失败，向 stderr
+    告警（不阻断对话），避免「悄无声息地丢历史」。
+    """
     if not path:
         return
     try:
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             _json.dump(history, f, ensure_ascii=False, indent=2)
-    except OSError:
-        pass
+    except OSError as exc:
+        typer.echo(f"⚠️ 会话历史保存失败（{path}）：{exc}", err=True)
 
 
 @app.command()

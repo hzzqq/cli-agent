@@ -475,3 +475,33 @@ def test_chat_session_persists_history(tmp_path, monkeypatch):
     assert any(
         m.get("role") == "user" and "你好" in m.get("content", "") for m in data
     )
+
+
+def test_version_command():
+    """R1 新需求验证：version 命令打印版本号。"""
+    r = runner.invoke(agent.app, ["version"])
+    assert r.exit_code == 0
+    assert agent.VERSION in r.stdout
+
+
+def test_save_session_creates_parent_dir(tmp_path):
+    """R2 隐性问题验证：会话落盘时父目录不存在应自动创建（而非静默丢历史）。"""
+    import json as _j
+
+    sess = tmp_path / "nested" / "deep" / "sess.json"
+    agent.save_session(str(sess), [{"role": "user", "content": "hi"}])
+    assert sess.exists()
+    data = _j.loads(sess.read_text(encoding="utf-8"))
+    assert data[0]["content"] == "hi"
+
+
+def test_save_session_warns_on_failure(tmp_path, capsys):
+    """R2 验证：即便保存因权限/路径问题失败，也应告警而不静默吞掉。"""
+    # 用一个非目录文件充当「父路径」，制造不可写场景
+    bad = tmp_path / "blocker"
+    bad.write_text("x")
+    sess = bad / "sess.json"  # 父路径是文件，无法 makedirs
+    agent.save_session(str(sess), [{"role": "user", "content": "hi"}])
+    # 文件未创建（保存确实失败），但应有警告输出到 stderr
+    captured = capsys.readouterr()
+    assert "会话历史保存失败" in (captured.err or captured.out)
