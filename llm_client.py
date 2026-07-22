@@ -142,6 +142,11 @@ class LLMClient:
                 if m.get("role") == "user":
                     question = m.get("content", "")
                     break
+            # 可观测性一致性：mock 模式也更新探针字段，避免调用方无法区分 mock/真实
+            self.last_attempts = 1
+            self.last_error = None
+            est = self.estimate_tokens(question)
+            self.last_usage = {"prompt_tokens": est, "completion_tokens": 0, "total_tokens": est}
             return self._mock_answer(question, context_files or [])
 
         sys_prompt = system_prompt or (
@@ -237,3 +242,37 @@ class LLMClient:
             f"{file_list}\n\n"
             "（这是离线 stub 答案；配置 OPENAI_BASE_URL / OPENAI_API_KEY 后即可获得真实 LLM 回答。）"
         )
+
+    def health(self) -> dict:
+        """探针：检测 LLM 端点可用性，返回结构化状态字典（可观测性 / 新能力）。
+
+        返回字段：
+          ok:      端点是否可用（mock 模式恒为 True）
+          mock:    是否处于 mock 模式
+          model:   目标模型名
+          attempts:真实调用实际尝试次数（mock 为 0）
+          error:   失败原因（成功为 None）
+        mock 模式不触网，直接返回可用；真实模式发一次最小请求探测。
+        """
+        if self.config.mock:
+            return {"ok": True, "mock": True, "model": self.config.model, "attempts": 0, "error": None}
+        try:
+            resp = self.complete(
+                [{"role": "user", "content": "ping"}],
+                system_prompt="你是一个健康检查探针，只回复 OK 两个字母。",
+            )
+            return {
+                "ok": bool(resp),
+                "mock": False,
+                "model": self.config.model,
+                "attempts": self.last_attempts,
+                "error": None,
+            }
+        except LLMError as exc:
+            return {
+                "ok": False,
+                "mock": False,
+                "model": self.config.model,
+                "attempts": self.last_attempts,
+                "error": str(exc),
+            }
