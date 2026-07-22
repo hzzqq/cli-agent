@@ -594,3 +594,57 @@ def test_index_missing_path_fails_fast(tmp_path):
     r = runner.invoke(agent.app, ["index", str(missing)])
     assert r.exit_code == 1
     assert "不存在或不是目录" in (r.stderr or r.stdout)
+
+
+def test_build_config_reads_file(tmp_path, monkeypatch):
+    """R1 新需求验证：_build_config 在 CLI 缺省时回落到持久化配置文件。"""
+    import json as _j
+
+    cfg_path = tmp_path / agent.CONFIG_FILE
+    cfg_path.write_text(_j.dumps({"model": "saved-model", "base_url": "http://saved"}), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    cfg = agent._build_config(None, None, None, root=str(tmp_path))
+    assert cfg is not None
+    assert cfg.model == "saved-model"
+    assert cfg.base_url == "http://saved"
+
+
+def test_build_config_cli_overrides_file(tmp_path, monkeypatch):
+    """CLI flag 应优先于配置文件（优先级：CLI > 文件 > 环境变量）。"""
+    import json as _j
+
+    cfg_path = tmp_path / agent.CONFIG_FILE
+    cfg_path.write_text(_j.dumps({"model": "file-model"}), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    cfg = agent._build_config("cli-model", None, None, root=str(tmp_path))
+    assert cfg.model == "cli-model"
+
+
+def test_load_file_config_whitelist_rejects_unknown_keys(tmp_path, monkeypatch):
+    """R2 类型安全验证：配置文件中的任意/畸形键不应被注入为 LLM 配置。"""
+    import json as _j
+
+    cfg_path = tmp_path / agent.CONFIG_FILE
+    cfg_path.write_text(_j.dumps({
+        "model": "ok",
+        "evil_key": "pwned",        # 非白名单键，应被忽略
+        "base_url": 12345,           # 非字符串值，应被忽略
+        "api_key": None,             # null，应被忽略
+    }), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    loaded = agent._load_file_config(str(tmp_path))
+    assert loaded == {"model": "ok"}  # 只保留白名单内的非空字符串
+
+
+def test_config_save_writes_file(tmp_path, monkeypatch):
+    """R1 新需求验证：config --save 把生效配置持久化到 .cliagent_config.json。"""
+    monkeypatch.chdir(tmp_path)
+    r = runner.invoke(agent.app, ["config", "--model", "m1", "--base-url", "http://b", "--save"])
+    assert r.exit_code == 0
+    assert "已保存" in r.stdout
+    cfg_path = tmp_path / agent.CONFIG_FILE
+    assert cfg_path.exists()
+    import json as _j
+    saved = _j.loads(cfg_path.read_text(encoding="utf-8"))
+    assert saved["model"] == "m1"
+    assert saved["base_url"] == "http://b"

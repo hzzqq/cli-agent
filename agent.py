@@ -30,6 +30,11 @@ from llm_client import LLMClient, LLMConfig, LLMError
 # 版本号：随每次功能性迭代递增，便于用户/脚本识别 CLI 能力级别。
 VERSION = "1.0.0"
 
+# 持久化配置文件：保存常用 LLM 接入项，避免每次运行重复敲 --model/--base-url/--api-key
+CONFIG_FILE = ".cliagent_config.json"
+# 允许写入/读取的配置文件键白名单（R2 类型安全：拒绝任意键，防配置注入）
+_CONFIG_KEYS = ("model", "base_url", "api_key")
+
 
 app = typer.Typer(
     help="垂直代码库问答 CLI 智能体：index 建索引，ask 单轮问答，chat 多轮对话。",
@@ -66,22 +71,60 @@ def _require_index() -> bool:
     return True
 
 
+def _load_file_config(root: str = ".") -> dict:
+    """读取持久化配置文件（.cliagent_config.json）中的 LLM 接入项。
+
+    R2 类型安全/防御（隐性健壮性问题）：仅接受白名单键且值为字符串，
+    拒绝任意键或畸形值被注入为 LLM 配置（避免配置文件被篡改后无声影响行为）；
+    文件不存在 / 损坏 / 非 dict 一律返回空 dict，不抛错、不中断命令。
+    """
+    path = os.path.join(root, CONFIG_FILE)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+    except (OSError, _json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for k in _CONFIG_KEYS:
+        v = data.get(k)
+        if isinstance(v, str) and v:  # 仅保留非空字符串，过滤 null/数字/列表等
+            out[k] = v
+    return out
+
+
+def _save_file_config(cfg: LLMConfig, root: str = ".") -> None:
+    """把生效的 LLM 配置写入持久化文件（仅白名单键）。"""
+    data = {k: getattr(cfg, k) for k in _CONFIG_KEYS}
+    path = os.path.join(root, CONFIG_FILE)
+    with open(path, "w", encoding="utf-8") as f:
+        _json.dump(data, f, ensure_ascii=False, indent=2)
+
+
 def _build_config(
-    model: Optional[str], base_url: Optional[str], api_key: Optional[str]
+    model: Optional[str], base_url: Optional[str], api_key: Optional[str], root: str = "."
 ) -> Optional[LLMConfig]:
-    """根据 CLI 覆盖项构造 LLMConfig；无覆盖则返回 None（沿用环境变量默认值）。"""
-    overrides = {}
-    if model:
-        overrides["model"] = model
-    if base_url:
-        overrides["base_url"] = base_url
-    if api_key:
-        overrides["api_key"] = api_key
-    if not overrides:
+    """根据 CLI 覆盖项构造 LLMConfig；CLI 缺省时回落到持久化配置文件；
+    两者皆无则沿用环境变量默认值（返回 None）。
+
+    R1 新能力：配置文件让常用接入项「一次写入、处处复用」，无需每次敲长 flag。
+    优先级：CLI flag > 配置文件 > 环境变量默认。
+    """
+    file_cfg = _load_file_config(root)
+    overrides = {
+        "model": model or file_cfg.get("model"),
+        "base_url": base_url or file_cfg.get("base_url"),
+        "api_key": api_key or file_cfg.get("api_key"),
+    }
+    if not any(overrides.values()):
         return None
     cfg = LLMConfig()
     for k, v in overrides.items():
-        setattr(cfg, k, v)
+        if v:
+            setattr(cfg, k, v)
     return cfg
 
 
@@ -486,13 +529,21 @@ def stats(
 
 @app.command()
 def config(
-    model: Optional[str] = typer.Option(None, "--model", help="覆盖模型名（仅用于预览生效值，不持久化）"),
-    base_url: Optional[str] = typer.Option(None, "--base-url", help="覆盖 API 地址（仅用于预览生效值）"),
-    api_key: Optional[str] = typer.Option(None, "--api-key", help="覆盖 API Key（仅用于预览生效值）"),
+    model: Optional[str] = typer.Option(None, "--model", help="覆盖模型名（仅用于预览生效值/持久化）"),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="覆盖 API 地址（仅用于预览生效值/持久化）"),
+    api_key: Optional[str] = typer.Option(None, "--api-key", help="覆盖 API Key（仅用于预览生效值/持久化）"),
+    save: bool = typer.Option(False, "--save", help="把当前生效配置写入 .cliagent_config.json，供后续运行复用"),
 ):
-    """展示当前生效的 LLM 配置（环境变量与默认值合并后的结果，可观测性）。"""
+    """展示当前生效的 LLM 配置（环境变量/配置文件/默认值合并后的结果，可观测性）。
+
+    R1 新能力：加 --save 可把当前生效配置持久化到 .cliagent_config.json，
+    后续 ask/chat/index 将自动读取，无需每次重复敲 --model/--base-url/--api-key。
+    """
     cfg = _build_config(model, base_url, api_key) or LLMConfig()
-    typer.echo("⚙️  当前 LLM 配置（环境变量 + 默认值合并后）：")
+    if save:
+        _save_file_config(cfg)
+        typer.echo(f"💾 配置已保存到 {CONFIG_FILE}（后续运行将自动读取）")
+    typer.echo("⚙️  当前 LLM 配置（环境变量 + 配置文件 + 默认值合并后）：")
     typer.echo(f"  base_url   : {cfg.base_url}")
     typer.echo(f"  model      : {cfg.model}")
     typer.echo(f"  mock       : {cfg.mock}")
