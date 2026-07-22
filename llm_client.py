@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -27,6 +28,15 @@ DEFAULT_MODEL = "qwen2.5:latest"
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_TOKENS = 1024
 DEFAULT_TEMPERATURE = 0.2
+DEFAULT_RETRIES = 1           # 瞬态错误的重试次数（不含首次）
+DEFAULT_BACKOFF = 0.2         # 指数退避基延迟（秒）
+
+# 判定为「值得重试」的瞬态错误关键词（网络抖动 / 限流 / 5xx）
+_TRANSIENT_KEYWORDS = (
+    "timeout", "timed out", "connection", "reset by peer", "broken pipe",
+    "429", "rate limit", "too many requests", "503", "502", "500",
+    "temporary", "try again", "econnrefused", "etimedout",
+)
 
 
 class LLMError(RuntimeError):
@@ -42,6 +52,8 @@ class LLMConfig:
     timeout: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT", str(DEFAULT_TIMEOUT))))
     max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))))
     temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", str(DEFAULT_TEMPERATURE))))
+    retries: int = field(default_factory=lambda: int(os.getenv("LLM_RETRIES", str(DEFAULT_RETRIES))))
+    backoff: float = field(default_factory=lambda: float(os.getenv("LLM_BACKOFF", str(DEFAULT_BACKOFF))))
 
 
 class LLMClient:
@@ -55,6 +67,8 @@ class LLMClient:
         self.config = config or LLMConfig()
         self._client = None
         self.last_usage: Optional[dict] = None  # 可观测性：最近一次 token 用量
+        self.last_attempts: int = 0             # 可观测性：最近一次调用实际尝试次数
+        self.last_error: Optional[str] = None   # 可观测性：最近一次失败原因（成功则为 None）
 
     def _get_client(self):
         if self._client is None:
@@ -105,27 +119,53 @@ class LLMClient:
         full = [{"role": "system", "content": sys_prompt}] + list(messages)
 
         client = self._get_client()
-        try:
-            resp = client.chat.completions.create(
-                model=self.config.model,
-                messages=full,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-            )
-        except Exception as exc:  # 隐性问题：网络/限流/鉴权错误需被捕获并包装
-            raise LLMError(f"LLM 调用失败：{exc}") from exc
+        message = ""
+        last_exc: Optional[Exception] = None
+        max_attempts = max(1, self.config.retries + 1)
+        attempts = 0
+        while attempts < max_attempts:
+            attempts += 1
+            try:
+                resp = client.chat.completions.create(
+                    model=self.config.model,
+                    messages=full,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                )
+            except Exception as exc:  # 隐性问题：网络/限流/鉴权错误需被捕获并包装
+                last_exc = exc
+                self.last_attempts = attempts
+                self.last_error = str(exc)
+                # 仅对「瞬态」错误重试；非瞬态（鉴权/参数）立即放弃，避免无效重试
+                if attempts >= max_attempts or not self._is_transient(exc):
+                    break
+                # 指数退避后重试，提升对网络抖动/限流的韧性
+                time.sleep(self.config.backoff * (2 ** (attempts - 1)))
+                continue
+            # 成功路径
+            self.last_attempts = attempts
+            self.last_error = None
+            message = resp.choices[0].message.content or ""
+            # 可观测性：记录 token 用量（部分兼容接口可能不返回 usage）
+            try:
+                self.last_usage = {
+                    "prompt_tokens": resp.usage.prompt_tokens,
+                    "completion_tokens": resp.usage.completion_tokens,
+                    "total_tokens": resp.usage.total_tokens,
+                }
+            except AttributeError:
+                self.last_usage = None
+            return message
 
-        message = resp.choices[0].message.content or ""
-        # 可观测性：记录 token 用量（部分兼容接口可能不返回 usage）
-        try:
-            self.last_usage = {
-                "prompt_tokens": resp.usage.prompt_tokens,
-                "completion_tokens": resp.usage.completion_tokens,
-                "total_tokens": resp.usage.total_tokens,
-            }
-        except AttributeError:
-            self.last_usage = None
-        return message
+        # 重试耗尽或全部为非瞬态错误：统一包装为 LLMError
+        retried = attempts - 1
+        suffix = f"（已重试 {retried} 次）" if retried > 0 else ""
+        raise LLMError(f"LLM 调用失败{suffix}：{last_exc}") from last_exc
+
+    @staticmethod
+    def _is_transient(exc: Exception) -> bool:
+        """判定异常是否为可重试的瞬态错误（网络抖动 / 限流 / 5xx）。"""
+        return any(k in str(exc).lower() for k in _TRANSIENT_KEYWORDS)
 
     def answer(
         self,

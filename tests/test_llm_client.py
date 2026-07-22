@@ -182,3 +182,65 @@ def test_complete_passes_custom_system_prompt(monkeypatch, fake_ok_client):
     assert call["messages"][0]["role"] == "system"
     assert call["messages"][0]["content"] == "你是测试助手"
     assert call["messages"][1]["content"] == "hi"
+
+
+class _FlakyCompletions:
+    """前 fail_times 次调用抛瞬态错误，之后返回成功，用于验证重试。"""
+    def __init__(self, resp, fail_times, exc_msg="connection refused"):
+        self._resp = resp
+        self.fail_times = fail_times
+        self.exc_msg = exc_msg
+        self.calls = 0
+
+    def create(self, **kwargs):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise RuntimeError(self.exc_msg)
+        return self._resp
+
+
+class _FlakyChat:
+    def __init__(self, resp, fail_times, exc_msg="connection refused"):
+        self.completions = _FlakyCompletions(resp, fail_times, exc_msg)
+
+
+class _FlakyClient:
+    def __init__(self, resp, fail_times, exc_msg="connection refused"):
+        self.chat = _FlakyChat(resp, fail_times, exc_msg)
+
+
+def test_retry_then_success(monkeypatch):
+    """R1 新需求验证：瞬态错误应自动重试，直到成功。"""
+    resp = _FakeResp("重试后成功", _FakeUsage(1, 1))
+    client = LLMClient(LLMConfig(mock=False, retries=2, backoff=0.0))
+    monkeypatch.setattr(client, "_get_client", lambda: _FlakyClient(resp, fail_times=2))
+    out = client.answer("问题", ["a.py"], "ctx")
+    assert out == "重试后成功"
+    assert client.last_attempts == 3          # 首次 + 重试 2 次
+    assert client.last_error is None
+
+
+def test_retry_exhausted_raises(monkeypatch):
+    """R2 韧性验证：重试耗尽后统一包装为 LLMError，并记录尝试次数。"""
+    client = LLMClient(LLMConfig(mock=False, retries=1, backoff=0.0))
+    monkeypatch.setattr(
+        client, "_get_client",
+        lambda: _FlakyClient(_FakeResp("x", _FakeUsage(1, 1)), fail_times=99, exc_msg="connection timed out"),
+    )
+    with pytest.raises(LLMError) as exc:
+        client.answer("问题", ["a.py"], "ctx")
+    assert "已重试 1 次" in str(exc.value)
+    assert client.last_attempts == 2
+
+
+def test_non_transient_no_retry(monkeypatch):
+    """R2 隐性正确性：鉴权等「非瞬态」错误不应重试，避免无效等待。"""
+    client = LLMClient(LLMConfig(mock=False, retries=3, backoff=0.0))
+    monkeypatch.setattr(
+        client, "_get_client",
+        lambda: _FlakyClient(_FakeResp("x", _FakeUsage(1, 1)), fail_times=99, exc_msg="401 unauthorized"),
+    )
+    with pytest.raises(LLMError) as exc:
+        client.answer("问题", ["a.py"], "ctx")
+    assert "已重试" not in str(exc.value)   # 非瞬态，未进入重试
+    assert client.last_attempts == 1
