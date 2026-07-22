@@ -648,3 +648,49 @@ def test_config_save_writes_file(tmp_path, monkeypatch):
     saved = _j.loads(cfg_path.read_text(encoding="utf-8"))
     assert saved["model"] == "m1"
     assert saved["base_url"] == "http://b"
+
+
+def test_search_command_json_output(tmp_path):
+    """R1 验证：search --json 以 JSON 数组输出命中文件（便于脚本消费）。"""
+    from index_store import IndexEntry, save_index
+
+    save_index([IndexEntry(path="foo.py", size=10, snippet="def hello(): pass")], str(tmp_path))
+    r = runner.invoke(agent.app, ["search", "hello", "--root", str(tmp_path), "--json"])
+    assert r.exit_code == 0
+    import json as _j
+    data = _j.loads(r.stdout)
+    assert isinstance(data, list) and len(data) == 1
+    assert data[0]["path"] == "foo.py"
+
+
+def test_files_command_json_output(tmp_path):
+    """R1 验证：files --json 以 JSON 数组输出索引文件与大小。"""
+    from index_store import IndexEntry, save_index
+
+    save_index([IndexEntry(path="a.py", size=12, snippet="x")], str(tmp_path))
+    r = runner.invoke(agent.app, ["files", "--root", str(tmp_path), "--json"])
+    assert r.exit_code == 0
+    import json as _j
+    data = _j.loads(r.stdout)
+    assert data[0]["path"] == "a.py"
+    assert data[0]["size"] == 12
+
+
+def test_related_command_json_output(tmp_path, monkeypatch):
+    """R1 验证：related --json 以 JSON 数组输出相似文件与分数。"""
+    from index_store import IndexEntry, save_index
+
+    # 构造索引：target.py 与 other.py 内容高度重叠；related 要求目标文件真实存在
+    (tmp_path / "target.py").write_text("def add(a, b): return a + b", encoding="utf-8")
+    save_index([
+        IndexEntry(path="target.py", size=20, snippet="def add(a, b): return a + b"),
+        IndexEntry(path="other.py", size=20, snippet="def add(a, b): return a + b"),
+    ], str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    r = runner.invoke(agent.app, ["related", "target.py", "--json"])
+    assert r.exit_code == 0
+    import json as _j
+    data = _j.loads(r.stdout)
+    assert isinstance(data, list) and len(data) >= 1
+    assert data[0]["path"] != "target.py"  # 排除自身
+    assert "score" in data[0]

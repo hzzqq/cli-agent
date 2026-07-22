@@ -442,6 +442,7 @@ def save_session(path: "Optional[str]", history: "list[dict]") -> None:
 def search(
     keyword: str = typer.Argument(..., help="在索引内容中检索的关键词"),
     root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录"),
+    as_json: bool = typer.Option(False, "--json", help="以 JSON 数组输出命中结果（便于脚本消费）"),
 ):
     """在本仓库索引中按关键词检索（不调用 LLM），快速定位相关文件。"""
     from index_store import INDEX_FILE, search_index
@@ -449,8 +450,18 @@ def search(
     path = os.path.join(root, INDEX_FILE)
     hits = search_index(keyword, path)
     if not hits:
-        typer.echo("未找到匹配的文件。")
+        if as_json:
+            typer.echo(_json.dumps([], ensure_ascii=False))
+        else:
+            typer.echo("未找到匹配的文件。")
         raise typer.Exit(code=1)
+    if as_json:
+        payload = [
+            {"path": e.path, "excerpt": _excerpt(e.snippet or "", keyword)}
+            for e in hits
+        ]
+        typer.echo(_json.dumps(payload, ensure_ascii=False, indent=2))
+        return
     typer.echo(f"🔍 命中 {len(hits)} 个文件：")
     for e in hits:
         typer.echo(f"  - {e.path}")
@@ -466,6 +477,7 @@ def related(
     max_size: Optional[int] = typer.Option(
         None, "--max-size", help="仅读取文件前 N 字节作为内容样本（避免大文件读全量）"
     ),
+    as_json: bool = typer.Option(False, "--json", help="以 JSON 数组输出相似文件（便于脚本消费）"),
 ):
     """找出与给定文件内容最相似的索引文件（不调用 LLM，基于 BM25 词重叠）。
 
@@ -492,8 +504,15 @@ def related(
     # 排除文件自身（其内容必然与自身最相似）
     rel = [(e, s) for e, s in hits if e.path != file][:top_k]
     if not rel:
-        typer.echo("未找到相似文件（索引可能未包含足够的可比内容，或目标文件内容过于独特）。")
+        if as_json:
+            typer.echo(_json.dumps([], ensure_ascii=False))
+        else:
+            typer.echo("未找到相似文件（索引可能未包含足够的可比内容，或目标文件内容过于独特）。")
         raise typer.Exit(code=1)
+    if as_json:
+        payload = [{"path": e.path, "score": round(s, 4)} for e, s in rel]
+        typer.echo(_json.dumps(payload, ensure_ascii=False, indent=2))
+        return
     typer.echo(f"🔗 与 {file} 最相似的 {len(rel)} 个文件：")
     for e, s in rel:
         typer.echo(f"  {s:.2f}　{e.path}")
@@ -591,6 +610,7 @@ def clear(
 @app.command()
 def files(
     root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录"),
+    as_json: bool = typer.Option(False, "--json", help="以 JSON 数组输出索引文件（便于脚本消费）"),
 ):
     """列出当前索引中的文件（路径与大小），用于审计索引内容（不调用 LLM）。"""
     from index_store import INDEX_FILE, load_index
@@ -598,8 +618,15 @@ def files(
     path = os.path.join(root, INDEX_FILE)
     entries = load_index(path)
     if not entries:
-        typer.echo(f"⚠️  索引为空或不存在（{path}）。请先运行：python agent.py index <目录>")
+        if as_json:
+            typer.echo(_json.dumps([], ensure_ascii=False))
+        else:
+            typer.echo(f"⚠️  索引为空或不存在（{path}）。请先运行：python agent.py index <目录>")
         raise typer.Exit(code=1)
+    if as_json:
+        payload = [{"path": e.path, "size": e.size} for e in entries]
+        typer.echo(_json.dumps(payload, ensure_ascii=False, indent=2))
+        return
     typer.echo(f"📄 索引包含 {len(entries)} 个文件（{path}）：")
     for e in entries:
         typer.echo(f"  - [{e.size} B] {e.path}")
