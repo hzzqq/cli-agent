@@ -62,6 +62,42 @@ def test_ask_mock_path_succeeds(monkeypatch):
     assert "MOCK" in r.stdout
 
 
+def test_ask_passes_system_prompt(monkeypatch):
+    """R1 新需求验证：--system-prompt 应透传给 LLMClient.complete。"""
+    captured = {}
+
+    def fake_complete(self, messages, context_files=None, system_prompt=None):
+        captured["system_prompt"] = system_prompt
+        return "答案"
+
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent.LLMClient, "complete", fake_complete)
+    r = runner.invoke(agent.app, ["ask", "问题", "--system-prompt", "你是严谨的助手"])
+    assert r.exit_code == 0
+    assert captured.get("system_prompt") == "你是严谨的助手"
+
+
+def test_ask_system_prompt_file(monkeypatch, tmp_path):
+    """R1 新需求验证：--system-prompt-file 从文件读取并透传。"""
+    sp_file = tmp_path / "sp.txt"
+    sp_file.write_text("来自文件的提示")
+    captured = {}
+
+    def fake_complete(self, messages, context_files=None, system_prompt=None):
+        captured["system_prompt"] = system_prompt
+        return "答案"
+
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent.LLMClient, "complete", fake_complete)
+    r = runner.invoke(agent.app, ["ask", "问题", "--system-prompt-file", str(sp_file)])
+    assert r.exit_code == 0
+    assert captured.get("system_prompt") == "来自文件的提示"
+
+
 def test_chat_is_multiturn(monkeypatch):
     """R1 新需求验证：chat 把历史传入 LLM，实现真正的多轮记忆。"""
     monkeypatch.setenv("MOCK_LLM", "1")

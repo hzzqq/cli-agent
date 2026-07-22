@@ -153,6 +153,8 @@ def ask(
     base_url: Optional[str] = typer.Option(None, "--base-url", help="指定 API 地址"),
     api_key: Optional[str] = typer.Option(None, "--api-key", help="指定 API Key"),
     as_json: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
+    system_prompt: Optional[str] = typer.Option(None, "--system-prompt", help="自定义系统提示（内联），覆盖默认助手提示"),
+    system_prompt_file: Optional[str] = typer.Option(None, "--system-prompt-file", help="从文件读取系统提示（优先于 --system-prompt）"),
 ):
     """基于索引检索相关文件并调用 LLM 作答。"""
     # 省略位置参数时，尝试从标准输入读取（管道场景）
@@ -164,7 +166,8 @@ def ask(
     if not _require_index():
         raise typer.Exit(code=1)
     cfg = _build_config(model, base_url, api_key)
-    _do_ask(question, top_k, config=cfg, as_json=as_json, min_score=min_score)
+    sp = _resolve_system_prompt(system_prompt, system_prompt_file)
+    _do_ask(question, top_k, config=cfg, as_json=as_json, min_score=min_score, system_prompt=sp)
 
 
 @app.command()
@@ -266,11 +269,14 @@ def chat(
     model: Optional[str] = typer.Option(None, "--model", help="指定模型名称"),
     base_url: Optional[str] = typer.Option(None, "--base-url", help="指定 API 地址"),
     api_key: Optional[str] = typer.Option(None, "--api-key", help="指定 API Key"),
+    system_prompt: Optional[str] = typer.Option(None, "--system-prompt", help="自定义系统提示（内联），覆盖默认助手提示"),
+    system_prompt_file: Optional[str] = typer.Option(None, "--system-prompt-file", help="从文件读取系统提示（优先于 --system-prompt）"),
 ):
     """进入交互式多轮对话，每轮都带上检索到的上下文。输入 exit/quit 退出。"""
     if not _require_index():
         raise typer.Exit(code=1)
     cfg = _build_config(model, base_url, api_key)
+    sp = _resolve_system_prompt(system_prompt, system_prompt_file)
     typer.echo("💬 进入对话模式（输入 exit 或 quit 退出）：")
     history: list[dict] = []
     while True:
@@ -284,7 +290,7 @@ def chat(
         if question.lower() in ("exit", "quit", "q"):
             typer.echo("👋 再见。")
             break
-        answer = _do_ask(question, top_k, config=cfg, history=history)
+        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp)
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": answer})
         typer.echo("")
