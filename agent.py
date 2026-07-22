@@ -96,6 +96,9 @@ def index(
     ext: Optional[str] = typer.Option(
         None, "--ext", help="只索引指定扩展名，逗号分隔，如 .py,.md"
     ),
+    max_size: Optional[int] = typer.Option(
+        None, "--max-size", help="跳过超过此字节数的文件（避免大锁文件/数据文件污染索引）"
+    ),
 ):
     """递归遍历目录，建立文本文件索引。"""
     exts = None
@@ -103,9 +106,16 @@ def index(
         exts = {e.strip().lower() for e in ext.split(",") if e.strip()}
         typer.echo(f"🔍 扩展名过滤：{', '.join(sorted(exts))}")
     typer.echo(f"🔍 正在索引目录：{path}")
-    entries = build_index(path, exts=exts)
+    entries, skipped = build_index(path, exts=exts, max_size=max_size)
     out = save_index(entries, root)
     typer.echo(f"✅ 已索引 {len(entries)} 个文件，索引保存到 {out}")
+    if skipped:
+        typer.echo(f"⏭️  跳过 {len(skipped)} 个文件（不受支持类型/超大/不可读）")
+        for s in skipped[:10]:
+            extra = f" ({s['size']} 字节)" if s["reason"] == "too_large" else ""
+            typer.echo(f"  - [{s['reason']}]{extra} {s['path']}")
+        if len(skipped) > 10:
+            typer.echo(f"  ... 其余 {len(skipped) - 10} 个省略")
 
 
 @app.command()

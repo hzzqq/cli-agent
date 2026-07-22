@@ -47,9 +47,7 @@ def _iter_files(root: str):
         # 就地修改 dirnames 以跳过无需遍历的目录
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for fname in filenames:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in TEXT_EXTS:
-                yield os.path.join(dirpath, fname)
+            yield os.path.join(dirpath, fname)
 
 
 def _read_snippet(path: str) -> str:
@@ -76,24 +74,41 @@ def _read_snippet(path: str) -> str:
         return ""
 
 
-def build_index(root: str, exts: "set[str] | None" = None) -> List[IndexEntry]:
-    """遍历 root，建立索引并返回条目列表。
+def build_index(
+    root: str,
+    exts: "set[str] | None" = None,
+    max_size: "int | None" = None,
+) -> "tuple[List[IndexEntry], List[dict]]":
+    """遍历 root，建立索引并返回 (条目列表, 跳过列表)。
 
     exts：可选扩展名白名单（小写，含点，如 {'.py', '.md'}）。提供时只索引这些类型。
+    max_size：可选单文件字节上限；超过的文件被跳过（避免大锁文件/数据文件污染索引）。
+
+    返回的 skipped 为 [{path, reason, ...}]，reason ∈
+    {"unsupported_ext", "ext_filter", "too_large", "unreadable"}，
+    便于 CLI 向用户公示「哪些文件没被索引」以提升可观测性。
     """
     entries: List[IndexEntry] = []
+    skipped: List[dict] = []
     for path in _iter_files(root):
-        if exts is not None:
-            ext = os.path.splitext(path)[1].lower()
-            if ext not in exts:
-                continue
+        ext = os.path.splitext(path)[1].lower()
+        if exts is not None and ext not in exts:
+            skipped.append({"path": path, "reason": "ext_filter"})
+            continue
+        if ext not in TEXT_EXTS:
+            skipped.append({"path": path, "reason": "unsupported_ext"})
+            continue
         try:
             size = os.path.getsize(path)
         except OSError:
+            skipped.append({"path": path, "reason": "unreadable"})
+            continue
+        if max_size is not None and size > max_size:
+            skipped.append({"path": path, "reason": "too_large", "size": size})
             continue
         snippet = _read_snippet(path)
         entries.append(IndexEntry(path=path, size=size, snippet=snippet))
-    return entries
+    return entries, skipped
 
 
 def save_index(entries: List[IndexEntry], root: str = ".") -> str:
