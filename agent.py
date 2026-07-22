@@ -24,7 +24,7 @@ import typer
 
 from index_store import build_index, save_index, load_index, INDEX_FILE
 from retriever import build_context
-from llm_client import LLMClient, LLMConfig
+from llm_client import LLMClient, LLMConfig, LLMError
 
 
 app = typer.Typer(
@@ -72,7 +72,11 @@ def _do_ask(
 ):
     context_text, paths = build_context(question, top_k=top_k)
     client = LLMClient(config)
-    answer = client.answer(question, paths, context_text)
+    try:
+        answer = client.answer(question, paths, context_text)
+    except LLMError as exc:  # 隐性问题：未捕获则向用户抛出裸栈
+        typer.echo(f"⚠️ 调用 LLM 失败：{exc}", err=True)
+        raise typer.Exit(code=1)
     if as_json:
         out = {"question": question, "answer": answer, "references": paths}
         typer.echo(_json.dumps(out, ensure_ascii=False, indent=2))
@@ -117,6 +121,27 @@ def ask(
         raise typer.Exit(code=1)
     cfg = _build_config(model, base_url, api_key)
     _do_ask(question, top_k, config=cfg, as_json=as_json)
+
+
+@app.command()
+def context(
+    question: str = typer.Argument(..., help="要检索的问题，用引号包裹"),
+    top_k: int = typer.Option(5, "--top-k", "-k", help="召回的相关文件数量"),
+):
+    """仅展示检索到的上下文与参考文件（不调用 LLM）。
+
+    便于排查检索质量、核对参考来源，或在不想消耗 LLM 额度时预览。
+    """
+    text, paths = build_context(question, top_k=top_k)
+    if not paths:
+        typer.echo("🔎 未检索到相关文件，请确认索引已建立且问题与仓库内容相关。")
+        raise typer.Exit(code=1)
+    typer.echo(f"🔎 召回 {len(paths)} 个文件，上下文长度 {len(text)} 字符：")
+    for p in paths:
+        typer.echo(f"  - {p}")
+    if text:
+        typer.echo("\n--- 上下文预览 ---")
+        typer.echo(text[:2000])
 
 
 @app.command()
