@@ -163,8 +163,13 @@ def index(
         typer.echo(f"🔍 扩展名过滤：{', '.join(sorted(exts))}")
     typer.echo(f"🔍 正在索引目录：{path}")
     prev = load_index(os.path.join(root, INDEX_FILE)) if incremental else None
-    if prev:
-        typer.echo(f"♻️  增量模式：载入旧索引 {len(prev)} 条，复用未变更文件")
+    if incremental:
+        # 隐性可观测性：原实现在「无旧索引」时静默不提示，用户误以为增量生效；
+        # 这里显式区分「复用」与「全量重建」，避免误导。
+        if prev:
+            typer.echo(f"♻️  增量模式：载入旧索引 {len(prev)} 条，复用未变更文件")
+        else:
+            typer.echo("♻️  增量模式：未发现旧索引，将执行全量重建")
     entries, skipped = build_index(path, exts=exts, max_size=max_size, prev=prev)
     out = save_index(entries, root)
     typer.echo(f"✅ 已索引 {len(entries)} 个文件，索引保存到 {out}")
@@ -326,6 +331,32 @@ def config(
     typer.echo(f"  temperature: {cfg.temperature}")
     typer.echo(f"  retries    : {cfg.retries}（退避基数 {cfg.backoff}s）")
     typer.echo(f"  api_key    : {'<已设置>' if cfg.api_key else '<未设置>'}")
+
+
+@app.command()
+def clear(
+    root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="确认删除索引文件（避免误删，默认仅预览）"),
+):
+    """删除当前索引文件（重置索引）。
+
+    默认只预览将被删除的文件，需加 --yes / -y 才真正删除，防止在非交互场景下误删。
+    """
+    from index_store import INDEX_FILE
+
+    path = os.path.join(root, INDEX_FILE)
+    if not os.path.exists(path):
+        typer.echo(f"ℹ️  没有可删除的索引文件（{path}）")
+        return
+    if not yes:
+        typer.echo(f"🔍 将删除索引文件：{path}\n（确认请加 --yes / -y）")
+        return
+    try:
+        os.remove(path)
+        typer.echo(f"🗑️  已删除索引文件：{path}")
+    except OSError as exc:
+        typer.echo(f"⚠️ 删除失败：{exc}", err=True)
+        raise typer.Exit(code=1)
 
 
 @app.command()

@@ -314,3 +314,42 @@ def test_files_command_empty_errors(tmp_path):
     r = runner.invoke(agent.app, ["files", "--root", str(tmp_path)])
     assert r.exit_code == 1
     assert "索引为空或不存在" in (r.stderr or r.stdout)
+
+
+def test_clear_command_preview_only(tmp_path):
+    """R1 新需求验证：clear 默认仅预览，不真正删除（防误删）。"""
+    from index_store import IndexEntry, save_index
+    save_index([IndexEntry(path="a.py", size=1, snippet="x")], str(tmp_path))
+    idx = tmp_path / ".cliagent_index.json"
+    assert idx.exists()
+    r = runner.invoke(agent.app, ["clear", "--root", str(tmp_path)])
+    assert r.exit_code == 0
+    assert "将删除" in r.stdout
+    assert idx.exists()  # 未真正删除
+
+
+def test_clear_command_with_yes_removes(tmp_path):
+    """R1 新需求验证：clear --yes 真正删除索引文件。"""
+    from index_store import IndexEntry, save_index
+    save_index([IndexEntry(path="a.py", size=1, snippet="x")], str(tmp_path))
+    idx = tmp_path / ".cliagent_index.json"
+    r = runner.invoke(agent.app, ["clear", "--root", str(tmp_path), "--yes"])
+    assert r.exit_code == 0
+    assert not idx.exists()
+
+
+def test_clear_command_no_file(tmp_path):
+    """无索引文件时，clear 应友好提示而非报错。"""
+    r = runner.invoke(agent.app, ["clear", "--root", str(tmp_path)])
+    assert r.exit_code == 0
+    assert "没有可删除" in r.stdout
+
+
+def test_index_incremental_no_old_index_message(tmp_path):
+    """R2 隐性可观测性验证：无旧索引时 --incremental 应明确提示将全量重建。"""
+    (tmp_path / "a.py").write_text("x = 1")
+    r = runner.invoke(
+        agent.app, ["index", str(tmp_path), "--root", str(tmp_path), "--incremental"]
+    )
+    assert r.exit_code == 0
+    assert "全量重建" in r.stdout
