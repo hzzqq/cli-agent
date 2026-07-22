@@ -71,3 +71,42 @@ def test_index_command_reports_skipped(tmp_path):
     assert "已索引 1 个文件" in r.stdout
     assert "跳过 1 个文件" in r.stdout
     assert "too_large" in r.stdout
+
+
+def test_build_index_incremental_reuses_unchanged(tmp_path, monkeypatch):
+    """R1 新需求：增量模式复用未变更文件，且变更文件(mtime)被重新读取。"""
+    import os as _os
+    import time
+
+    f = tmp_path / "a.py"
+    f.write_text("VERSION = 1")
+    e1, _ = build_index(str(tmp_path))
+    assert len(e1) == 1
+    old_snippet = e1[0].snippet
+    mtime_before = e1[0].mtime
+
+    # 未变更：复用旧条目（snippet 完全一致，不需要重读）
+    e2, _ = build_index(str(tmp_path), prev=e1)
+    assert len(e2) == 1
+    assert e2[0].snippet == old_snippet
+    assert e2[0].mtime == mtime_before
+
+    # 修改文件内容，再把 mtime 推到明显不同的值：应重新读取（新内容进入 snippet）
+    f.write_text("VERSION = 2  # changed")
+    _os.utime(f, (mtime_before + 100, mtime_before + 100))
+    e3, _ = build_index(str(tmp_path), prev=e1)
+    assert len(e3) == 1
+    assert e3[0].snippet != old_snippet
+    assert "VERSION = 2" in e3[0].snippet
+
+
+def test_index_command_incremental_flag(tmp_path):
+    """CLI --incremental 应进入增量模式，复用旧索引。"""
+    (tmp_path / "a.py").write_text("x = 1")
+    r1 = runner.invoke(agent.app, ["index", str(tmp_path), "--root", str(tmp_path)])
+    assert r1.exit_code == 0
+    r2 = runner.invoke(
+        agent.app, ["index", str(tmp_path), "--root", str(tmp_path), "--incremental"]
+    )
+    assert r2.exit_code == 0
+    assert "增量模式" in r2.stdout

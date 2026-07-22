@@ -40,6 +40,7 @@ class IndexEntry:
     path: str
     size: int
     snippet: str
+    mtime: float = 0.0  # 修改时间，用于增量索引时判断文件是否变更
 
 
 def _iter_files(root: str):
@@ -78,16 +79,20 @@ def build_index(
     root: str,
     exts: "set[str] | None" = None,
     max_size: "int | None" = None,
+    prev: "List[IndexEntry] | None" = None,
 ) -> "tuple[List[IndexEntry], List[dict]]":
     """遍历 root，建立索引并返回 (条目列表, 跳过列表)。
 
     exts：可选扩展名白名单（小写，含点，如 {'.py', '.md'}）。提供时只索引这些类型。
     max_size：可选单文件字节上限；超过的文件被跳过（避免大锁文件/数据文件污染索引）。
+    prev：上一轮索引条目；提供时进入「增量模式」——mtime 与 size 均未变的文件直接
+        复用旧条目（不重读 snippet），显著减少大仓库的重复 I/O（隐性性能悬崖）。
 
     返回的 skipped 为 [{path, reason, ...}]，reason ∈
     {"unsupported_ext", "ext_filter", "too_large", "unreadable"}，
     便于 CLI 向用户公示「哪些文件没被索引」以提升可观测性。
     """
+    prev_by_path = {e.path: e for e in (prev or [])}
     entries: List[IndexEntry] = []
     skipped: List[dict] = []
     for path in _iter_files(root):
@@ -100,14 +105,20 @@ def build_index(
             continue
         try:
             size = os.path.getsize(path)
+            mtime = os.path.getmtime(path)
         except OSError:
             skipped.append({"path": path, "reason": "unreadable"})
             continue
         if max_size is not None and size > max_size:
             skipped.append({"path": path, "reason": "too_large", "size": size})
             continue
+        # 增量模式：未变更的文件直接复用旧条目，跳过 I/O
+        old = prev_by_path.get(path)
+        if old is not None and old.mtime == mtime and old.size == size:
+            entries.append(old)
+            continue
         snippet = _read_snippet(path)
-        entries.append(IndexEntry(path=path, size=size, snippet=snippet))
+        entries.append(IndexEntry(path=path, size=size, snippet=snippet, mtime=mtime))
     return entries, skipped
 
 

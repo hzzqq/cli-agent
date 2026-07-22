@@ -125,6 +125,9 @@ def index(
     max_size: Optional[int] = typer.Option(
         None, "--max-size", help="跳过超过此字节数的文件（避免大锁文件/数据文件污染索引）"
     ),
+    incremental: bool = typer.Option(
+        False, "--incremental", help="增量重建：未变更（mtime/size 不变）的文件直接复用旧索引，省去重复 I/O"
+    ),
 ):
     """递归遍历目录，建立文本文件索引。"""
     exts = None
@@ -132,7 +135,10 @@ def index(
         exts = {e.strip().lower() for e in ext.split(",") if e.strip()}
         typer.echo(f"🔍 扩展名过滤：{', '.join(sorted(exts))}")
     typer.echo(f"🔍 正在索引目录：{path}")
-    entries, skipped = build_index(path, exts=exts, max_size=max_size)
+    prev = load_index(os.path.join(root, INDEX_FILE)) if incremental else None
+    if prev:
+        typer.echo(f"♻️  增量模式：载入旧索引 {len(prev)} 条，复用未变更文件")
+    entries, skipped = build_index(path, exts=exts, max_size=max_size, prev=prev)
     out = save_index(entries, root)
     typer.echo(f"✅ 已索引 {len(entries)} 个文件，索引保存到 {out}")
     if skipped:
