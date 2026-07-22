@@ -329,6 +329,23 @@ def config(
 
 
 @app.command()
+def files(
+    root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录"),
+):
+    """列出当前索引中的文件（路径与大小），用于审计索引内容（不调用 LLM）。"""
+    from index_store import INDEX_FILE, load_index
+
+    path = os.path.join(root, INDEX_FILE)
+    entries = load_index(path)
+    if not entries:
+        typer.echo(f"⚠️  索引为空或不存在（{path}）。请先运行：python agent.py index <目录>")
+        raise typer.Exit(code=1)
+    typer.echo(f"📄 索引包含 {len(entries)} 个文件（{path}）：")
+    for e in entries:
+        typer.echo(f"  - [{e.size} B] {e.path}")
+
+
+@app.command()
 def chat(
     top_k: int = typer.Option(5, "--top-k", "-k", help="每轮召回的相关文件数量"),
     model: Optional[str] = typer.Option(None, "--model", help="指定模型名称"),

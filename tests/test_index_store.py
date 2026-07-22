@@ -110,3 +110,25 @@ def test_index_command_incremental_flag(tmp_path):
     )
     assert r2.exit_code == 0
     assert "增量模式" in r2.stdout
+
+
+def test_index_stats_returns_metadata_and_indexed_at(tmp_path):
+    """R2 验证：index_stats 单次读取即返回统计与建立时间（无冗余 I/O）。"""
+    from index_store import save_index, index_stats, IndexEntry
+    save_index([
+        IndexEntry(path="a.py", size=10, snippet="x=1"),
+        IndexEntry(path="b.md", size=20, snippet="y"),
+    ], str(tmp_path))
+    s = index_stats(str(tmp_path / INDEX_FILE))
+    assert s is not None
+    assert s["file_count"] == 2
+    assert s["total_bytes"] == 30
+    assert s["indexed_at"]  # 单次读取即拿到建立时间，不依赖第二次单独 open
+    exts = dict(s["top_extensions"])
+    assert exts.get(".py") == 1 and exts.get(".md") == 1
+
+
+def test_index_stats_missing_file_returns_none(tmp_path):
+    """索引文件不存在时 index_stats 返回 None（供 CLI 友好提示）。"""
+    from index_store import index_stats
+    assert index_stats(str(tmp_path / "nope.json")) is None

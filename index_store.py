@@ -176,8 +176,20 @@ def prune_missing(root: str, index_path: str = INDEX_FILE) -> int:
 
 
 def index_stats(index_path: str = INDEX_FILE) -> "Dict | None":
-    """返回索引统计信息；无索引时返回 None（供 CLI 友好提示）。"""
-    entries = load_index(index_path)
+    """返回索引统计信息；无索引（或文件损坏）时返回 None（供 CLI 友好提示）。
+
+    隐性性能/健壮性：原实现先 load_index 再单独 open 读一次 indexed_at，
+    对同一个文件做了两次磁盘读取，且第二次读取失败时静默丢失 indexed_at。
+    这里改为只读取并解析一次，同时拿到 files 与 indexed_at，消除冗余 I/O。
+    """
+    if not os.path.exists(index_path):
+        return None
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    entries = [IndexEntry(**item) for item in data.get("files", [])]
     if not entries:
         return None
     total = sum(e.size for e in entries)
@@ -185,15 +197,9 @@ def index_stats(index_path: str = INDEX_FILE) -> "Dict | None":
     for e in entries:
         ext = os.path.splitext(e.path)[1].lower() or "(无扩展名)"
         ext_counter[ext] += 1
-    indexed_at = ""
-    try:
-        with open(index_path, "r", encoding="utf-8") as f:
-            indexed_at = json.load(f).get("indexed_at", "")
-    except Exception:
-        pass
     return {
         "file_count": len(entries),
         "total_bytes": total,
         "top_extensions": sorted(ext_counter.items(), key=lambda x: -x[1]),
-        "indexed_at": indexed_at,
+        "indexed_at": data.get("indexed_at", ""),
     }

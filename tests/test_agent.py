@@ -293,3 +293,24 @@ def test_require_index_reports_corrupt_not_missing(tmp_path, monkeypatch):
     assert r.exit_code == 1
     assert "无法解析" in (r.stderr or r.stdout)
     assert "尚未发现" not in (r.stderr or r.stdout)
+
+
+def test_files_command_lists_indexed(tmp_path):
+    """R1 新需求验证：files 命令列出索引中的文件与大小。"""
+    from index_store import IndexEntry, save_index
+    save_index([
+        IndexEntry(path="foo.py", size=12, snippet="x=1"),
+        IndexEntry(path="bar.md", size=8, snippet="# t"),
+    ], str(tmp_path))
+    r = runner.invoke(agent.app, ["files", "--root", str(tmp_path)])
+    assert r.exit_code == 0
+    assert "foo.py" in r.stdout
+    assert "bar.md" in r.stdout
+    assert "2 个文件" in r.stdout
+
+
+def test_files_command_empty_errors(tmp_path):
+    """索引为空/不存在时，files 命令应友好报错。"""
+    r = runner.invoke(agent.app, ["files", "--root", str(tmp_path)])
+    assert r.exit_code == 1
+    assert "索引为空或不存在" in (r.stderr or r.stdout)
