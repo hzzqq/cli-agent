@@ -95,6 +95,27 @@ def test_chinese_phrase_recall(cn_index):
     assert hits and hits[0].path == "模型训练.py"
 
 
+def test_build_context_caps_single_block(tmp_path, monkeypatch):
+    """R1 新需求验证：巨型文件片段被截断，避免独占上下文挤出其它相关文件。"""
+    from index_store import IndexEntry, save_index
+    from retriever import MAX_BLOCK_CHARS
+
+    huge = "x" * (MAX_BLOCK_CHARS * 4)  # 远超单块上限
+    entries = [
+        IndexEntry(path="huge.py", size=9999, snippet=huge),
+        IndexEntry(path="small.py", size=10, snippet="foo bar function"),
+    ]
+    save_index(entries, str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    text, paths = build_context("foo function", top_k=10)
+    # 巨型文件片段被截断并标注
+    assert "已截断" in text
+    # 截断后单块不撑爆整体上下文上限
+    assert len(text) <= MAX_BLOCK_CHARS + 500
+    # 另一相关文件仍被纳入，未被巨型文件挤出
+    assert "small.py" in paths
+
+
 def test_chinese_query_hits_partial(cn_index):
     # query「数据」应召回含「数据」的文件（标注数据 / 数据清洗）
     hits = retrieve("数据处理", top_k=3)

@@ -104,6 +104,8 @@ def retrieve(question: str, top_k: int = 5, min_score: float = 0.0) -> List[Inde
 
 # 上下文拼接上限（字符），防止超大仓库把所有片段塞进 prompt 撑爆 LLM 上下文
 MAX_CONTEXT_CHARS = 6000
+# 单个文件片段上限（字符）：防止某个巨型文件独占上下文、挤掉其它相关文件
+MAX_BLOCK_CHARS = 2000
 
 
 def build_context(question: str, top_k: int = 5, min_score: float = 0.0) -> tuple[str, List[str]]:
@@ -120,10 +122,17 @@ def build_context(question: str, top_k: int = 5, min_score: float = 0.0) -> tupl
     parts = []
     total = 0
     for e, score in hits:
+        snippet = e.snippet
+        truncated = False
+        if len(snippet) > MAX_BLOCK_CHARS:
+            snippet = snippet[:MAX_BLOCK_CHARS]
+            truncated = True
         block = (
             f"--- 文件: {e.path} (大小: {e.size} 字节, 相关度: {score:.2f}) ---\n"
-            f"{e.snippet}"
+            f"{snippet}"
         )
+        if truncated:
+            block += "\n...(该文件片段过长，已截断)"
         # 已有内容且加入会超上限时，停止（保留高相关片段）
         if parts and total + len(block) > MAX_CONTEXT_CHARS:
             break
