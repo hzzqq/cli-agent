@@ -23,7 +23,7 @@ runner = CliRunner()
 def test_context_command_shows_refs(monkeypatch):
     """R1 新需求验证：context 命令只展示检索结果，不调用 LLM。"""
     monkeypatch.setattr(
-        agent, "build_context", lambda q, top_k=5: ("这是一段上下文", ["a.py", "b.py"])
+        agent, "build_context", lambda q, top_k=5, min_score=0.0: ("这是一段上下文", ["a.py", "b.py"])
     )
     r = runner.invoke(agent.app, ["context", "这个函数是做什么的"])
     assert r.exit_code == 0
@@ -32,7 +32,7 @@ def test_context_command_shows_refs(monkeypatch):
 
 
 def test_context_command_no_hit(monkeypatch):
-    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5: ("", []))
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("", []))
     r = runner.invoke(agent.app, ["context", "无关问题"])
     assert r.exit_code == 1
     assert "未检索到" in r.stdout
@@ -42,7 +42,7 @@ def test_ask_handles_llm_error_gracefully(monkeypatch):
     """R2 隐式问题验证：LLM 调用失败应被友好捕获，而非抛出裸栈。"""
     monkeypatch.setenv("MOCK_LLM", "0")  # 强制真实分支
     monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
-    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("ctx", ["a.py"]))
 
     def boom(self, question, context_files, context_text):
         raise agent.LLMError("模拟网络错误")
@@ -56,7 +56,23 @@ def test_ask_handles_llm_error_gracefully(monkeypatch):
 def test_ask_mock_path_succeeds(monkeypatch):
     monkeypatch.setenv("MOCK_LLM", "1")  # 走 mock 分支
     monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
-    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("ctx", ["a.py"]))
     r = runner.invoke(agent.app, ["ask", "问题"])
     assert r.exit_code == 0
     assert "MOCK" in r.stdout
+
+
+def test_ask_min_score_passed_to_build_context(monkeypatch):
+    """R1 新需求验证：--min-score 选项应透传给 build_context。"""
+    captured = {}
+
+    def fake_build(question, top_k=5, min_score=0.0):
+        captured["min_score"] = min_score
+        return "ctx", ["a.py"]
+
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    monkeypatch.setattr(agent, "build_context", fake_build)
+    r = runner.invoke(agent.app, ["ask", "问题", "--min-score", "0.5"])
+    assert r.exit_code == 0
+    assert captured.get("min_score") == 0.5

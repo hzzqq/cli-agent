@@ -59,8 +59,12 @@ def _idf(term: str, docs_tokens: List[List[str]]) -> float:
     return math.log((len(docs_tokens) + 1) / (df + 1)) + 1.0
 
 
-def retrieve(question: str, top_k: int = 5) -> List[IndexEntry]:
-    """根据问题召回 top-K 相关文件。找不到索引时返回空列表。"""
+def retrieve_scored(question: str, top_k: int = 5, min_score: float = 0.0):
+    """根据问题召回 top-K 相关文件，并返回每项的相关度分数。
+
+    返回 [(entry, score), ...] 按分数降序。min_score 用于过滤弱相关命中
+    （隐性问题：无阈值会把噪声文件一并送入 LLM 上下文，拉低回答质量）。
+    """
     entries = load_index()
     if not entries:
         return []
@@ -73,7 +77,7 @@ def retrieve(question: str, top_k: int = 5) -> List[IndexEntry]:
     if not q_tokens:
         return []
 
-    scores = []
+    scored = []
     for entry, toks in docs:
         tf = {}
         for t in toks:
@@ -86,31 +90,40 @@ def retrieve(question: str, top_k: int = 5) -> List[IndexEntry]:
                 idf_cache[qt] = _idf(qt, docs_tokens)
             # 简单 TF-IDF
             score += (tf[qt] / max(len(toks), 1)) * idf_cache[qt]
-        if score > 0:
-            scores.append((score, entry))
+        if score >= min_score:
+            scored.append((score, entry))
 
-    scores.sort(key=lambda x: x[0], reverse=True)
-    return [e for _, e in scores[:top_k]]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [(e, s) for s, e in scored[:top_k]]
+
+
+def retrieve(question: str, top_k: int = 5, min_score: float = 0.0) -> List[IndexEntry]:
+    """根据问题召回 top-K 相关文件。找不到索引时返回空列表。"""
+    return [e for e, _ in retrieve_scored(question, top_k=top_k, min_score=min_score)]
 
 
 # 上下文拼接上限（字符），防止超大仓库把所有片段塞进 prompt 撑爆 LLM 上下文
 MAX_CONTEXT_CHARS = 6000
 
 
-def build_context(question: str, top_k: int = 5) -> tuple[str, List[str]]:
+def build_context(question: str, top_k: int = 5, min_score: float = 0.0) -> tuple[str, List[str]]:
     """返回 (拼接好的上下文文本, 命中的文件路径列表)。
 
     拼接受到 MAX_CONTEXT_CHARS 上限约束：一旦累计超过上限且已有内容，
     则停止追加后续文件（保证最相关的文件优先进入上下文）。
+    每个块头部标注相关度分数，提升上下文可读性与可观测性。
     """
-    hits = retrieve(question, top_k=top_k)
-    paths = [e.path for e in hits]
+    hits = retrieve_scored(question, top_k=top_k, min_score=min_score)
+    paths = [e.path for e, _ in hits]
     if not hits:
         return "", []
     parts = []
     total = 0
-    for e in hits:
-        block = f"--- 文件: {e.path} (大小: {e.size} 字节) ---\n{e.snippet}"
+    for e, score in hits:
+        block = (
+            f"--- 文件: {e.path} (大小: {e.size} 字节, 相关度: {score:.2f}) ---\n"
+            f"{e.snippet}"
+        )
         # 已有内容且加入会超上限时，停止（保留高相关片段）
         if parts and total + len(block) > MAX_CONTEXT_CHARS:
             break

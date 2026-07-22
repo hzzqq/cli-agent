@@ -69,8 +69,9 @@ def _do_ask(
     top_k: int,
     config: Optional[LLMConfig] = None,
     as_json: bool = False,
+    min_score: float = 0.0,
 ):
-    context_text, paths = build_context(question, top_k=top_k)
+    context_text, paths = build_context(question, top_k=top_k, min_score=min_score)
     client = LLMClient(config)
     try:
         answer = client.answer(question, paths, context_text)
@@ -111,6 +112,7 @@ def index(
 def ask(
     question: str = typer.Argument(..., help="要问的问题，用引号包裹"),
     top_k: int = typer.Option(5, "--top-k", "-k", help="召回的相关文件数量"),
+    min_score: float = typer.Option(0.0, "--min-score", help="最低相关度阈值，过滤弱相关文件"),
     model: Optional[str] = typer.Option(None, "--model", help="指定模型名称"),
     base_url: Optional[str] = typer.Option(None, "--base-url", help="指定 API 地址"),
     api_key: Optional[str] = typer.Option(None, "--api-key", help="指定 API Key"),
@@ -120,19 +122,20 @@ def ask(
     if not _require_index():
         raise typer.Exit(code=1)
     cfg = _build_config(model, base_url, api_key)
-    _do_ask(question, top_k, config=cfg, as_json=as_json)
+    _do_ask(question, top_k, config=cfg, as_json=as_json, min_score=min_score)
 
 
 @app.command()
 def context(
     question: str = typer.Argument(..., help="要检索的问题，用引号包裹"),
     top_k: int = typer.Option(5, "--top-k", "-k", help="召回的相关文件数量"),
+    min_score: float = typer.Option(0.0, "--min-score", help="最低相关度阈值，过滤弱相关文件"),
 ):
     """仅展示检索到的上下文与参考文件（不调用 LLM）。
 
     便于排查检索质量、核对参考来源，或在不想消耗 LLM 额度时预览。
     """
-    text, paths = build_context(question, top_k=top_k)
+    text, paths = build_context(question, top_k=top_k, min_score=min_score)
     if not paths:
         typer.echo("🔎 未检索到相关文件，请确认索引已建立且问题与仓库内容相关。")
         raise typer.Exit(code=1)

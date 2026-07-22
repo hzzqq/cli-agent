@@ -100,3 +100,25 @@ def test_chinese_query_hits_partial(cn_index):
     hits = retrieve("数据处理", top_k=3)
     paths = [e.path for e in hits]
     assert "数据清洗.py" in paths
+
+
+def test_retrieve_min_score_filters_weak(tmp_path, monkeypatch):
+    # strong.py 中 foo 出现 4 次（强相关），weak.py 仅 1 次（弱相关）
+    # min_score 设到两者之间，只应保留强相关文件
+    entries = [
+        IndexEntry(path="strong.py", size=10, snippet="foo foo foo foo"),
+        IndexEntry(path="weak.py", size=10, snippet="foo bar"),
+    ]
+    save_index(entries, str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    hits = retrieve("foo", top_k=5, min_score=0.4)
+    paths = [e.path for e in hits]
+    assert paths == ["strong.py"]  # 仅强相关
+    assert "weak.py" not in paths
+
+
+def test_build_context_labels_score(sample_index):
+    text, paths = build_context("foo", top_k=5)
+    assert "相关度" in text  # 可观测性：上下文标注相关度
+    assert "大小:" in text
+
