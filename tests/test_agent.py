@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import agent  # noqa: E402
+import retriever  # noqa: E402
 from typer.testing import CliRunner  # noqa: E402
 
 runner = CliRunner()
@@ -149,6 +150,29 @@ def test_ask_max_context_chars_passed(monkeypatch):
     r = runner.invoke(agent.app, ["ask", "问题", "--max-context-chars", "1234"])
     assert r.exit_code == 0
     assert captured.get("max_context_chars") == 1234
+
+
+def test_ask_explain_invokes_explanation(monkeypatch):
+    """R1 新需求验证：--explain 打印检索解释（命中文件+相关度+命中词）。"""
+    captured = {}
+
+    def fake_build(question, top_k=5, min_score=0.0, max_context_chars=6000):
+        return "ctx", ["a.py"]
+
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    monkeypatch.setattr(agent, "build_context", fake_build)
+
+    def fake_explain(q, top_k=5, min_score=0.0):
+        captured["q"] = q
+        return [{"path": "a.py", "score": 0.9, "terms": ["foo"]}]
+
+    monkeypatch.setattr(retriever, "explain_retrieval", fake_explain)
+    r = runner.invoke(agent.app, ["ask", "foo问题", "--explain"])
+    assert r.exit_code == 0
+    assert captured.get("q") == "foo问题"
+    assert "检索解释" in r.stdout
+    assert "a.py" in r.stdout
 
 
 def test_search_command(monkeypatch, tmp_path):

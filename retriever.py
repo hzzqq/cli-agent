@@ -113,15 +113,23 @@ def explain_retrieval(question: str, top_k: int = 5, min_score: float = 0.0) -> 
     返回 [{"path": str, "score": float, "terms": List[str]}, ...]，
     供 context 命令或外部工具展示「为什么召回了这些文件」。
     """
+    from collections import Counter
+
     hits = retrieve_scored(question, top_k=top_k, min_score=min_score)
-    q_set = set(_tokenize(question))
+    # R2 修复（一致性）：原实现用 set(q_tokens)，丢失查询词频，
+    # 导致展示的命中词顺序与 retrieve_scored 的打分权重（Counter 加权）脱节。
+    # 现用 Counter，命中的词按「在查询中出现的频次」降序排列，
+    # 与打分逻辑一致，便于用户理解「为什么这条得分高」。
+    q_counter = Counter(_tokenize(question))
     out: List[dict] = []
     for e, score in hits:
         doc_tokens = set(_tokenize(f"{e.path}\n{e.snippet}"))
+        matched = [t for t in q_counter if t in doc_tokens]
+        terms = sorted(matched, key=lambda t: -q_counter[t])
         out.append({
             "path": e.path,
             "score": score,
-            "terms": sorted(q_set & doc_tokens),
+            "terms": terms,
         })
     return out
 

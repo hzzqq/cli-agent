@@ -139,9 +139,20 @@ def load_index(index_path: str = INDEX_FILE) -> List[IndexEntry]:
     try:
         with open(index_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return [IndexEntry(**item) for item in data.get("files", [])]
-    except (OSError, json.JSONDecodeError, TypeError):
+        files = data.get("files", []) if isinstance(data, dict) else []
+    except (OSError, json.JSONDecodeError):
         return []
+    # R2 修复（健壮性）：原实现对单条条目用 IndexEntry(**item) 的整体列表推导，
+    # 任一条目字段缺失/类型错误会抛 TypeError，被外层捕获后「整个索引」返回 []，
+    # 导致 _require_index 误报「尚未发现索引文件」、ask 直接中止，即便其余条目完好。
+    # 现改为逐条构造，残缺条目单独跳过，保留可用部分（部分损坏不应拖垮整体）。
+    entries: List[IndexEntry] = []
+    for item in files:
+        try:
+            entries.append(IndexEntry(**item))
+        except (TypeError, ValueError):
+            continue
+    return entries
 
 
 def search_index(keyword: str, index_path: str = INDEX_FILE) -> List[IndexEntry]:

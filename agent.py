@@ -102,6 +102,7 @@ def _do_ask(
     verbose: bool = False,
     max_context_chars: int = 6000,
     stream: bool = True,
+    explain: bool = False,
 ):
     # 隐性问题：--no-context 下不应再强制检索，否则会为「纯通用问题」无谓加载索引
     if no_context:
@@ -122,6 +123,15 @@ def _do_ask(
             "⚠️ 未检索到相关文件，将仅凭 LLM 已有知识作答（可尝试调整问题或重新运行 index）",
             err=True,
         )
+    # R1 新能力：--explain 展示「为什么召回这些文件」——
+    # 命中路径 + 相关度分数 + 命中关键词（频率降序），提升检索透明性。
+    if explain and not no_context and paths:
+        from retriever import explain_retrieval
+
+        typer.echo("🔎 检索解释（按相关度）：")
+        for hit in explain_retrieval(question, top_k=top_k, min_score=min_score):
+            terms = "、".join(hit["terms"]) or "（无显式关键词匹配）"
+            typer.echo(f"  {hit['score']:.2f}　{hit['path']}　命中词：{terms}")
     client = LLMClient(config)
     # 多轮时把历史 + 当前问题（含检索上下文）组装成 messages 传给 complete，
     # 使 chat 真正具备「多轮记忆」，而非每轮只看当前问题（隐性正确性缺陷）。
@@ -228,6 +238,7 @@ def ask(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="打印检索概况（命中文件数 / 上下文字符数 / 估算 token）"),
         max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符），超出后停止追加更低相关文件"),
         no_stream: bool = typer.Option(False, "--no-stream", help="关闭流式输出，等生成完毕后一次性打印（兼容管道/脚本）"),
+        explain: bool = typer.Option(False, "--explain", "-e", help="打印检索解释（命中文件+相关度+命中词），便于排查召回质量"),
 ):
     """基于索引检索相关文件并调用 LLM 作答。"""
     # 问题来源优先级：--file > 位置参数 > 管道（stdin）
@@ -251,6 +262,7 @@ def ask(
         question, top_k, config=cfg, as_json=as_json, min_score=min_score,
         system_prompt=sp, no_context=no_context, save_path=save_path, verbose=verbose,
         max_context_chars=max_context_chars, stream=not no_stream,
+        explain=explain,
     )
 
 
@@ -289,6 +301,41 @@ def _excerpt(text: str, keyword: str, width: int = 60) -> str:
     start = max(0, idx - width // 2)
     end = min(len(text), start + width)
     return text[start:end].replace("\n", " ")
+
+
+def load_session(path: "Optional[str]") -> "list[dict]":
+    """从 JSON 文件载入对话历史（多轮会话持久化，R1 新能力支撑）。
+
+    让 chat 的多轮历史在 CLI 重启后仍能恢复。文件不存在 / 解析失败 /
+    结构非法时返回空列表（不抛错）；对每条消息做基础校验，畸形项直接
+    丢弃，避免把脏数据喂给 LLM。
+    """
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+    except (OSError, _json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    out: list[dict] = []
+    for m in data:
+        if (isinstance(m, dict) and m.get("role") in ("system", "user", "assistant")
+                and isinstance(m.get("content"), str)):
+            out.append({"role": m["role"], "content": m["content"]})
+    return out
+
+
+def save_session(path: "Optional[str]", history: "list[dict]") -> None:
+    """把对话历史写入 JSON 文件（多轮会话持久化）。失败静默，不阻断对话。"""
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(history, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
 
 
 @app.command()
@@ -422,6 +469,8 @@ def chat(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="打印检索概况（命中文件数 / 上下文字符数 / 估算 token）"),
         max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符），超出后停止追加更低相关文件"),
         no_stream: bool = typer.Option(False, "--no-stream", help="关闭流式输出，等生成完毕后一次性打印"),
+        explain: bool = typer.Option(False, "--explain", "-e", help="每轮打印检索解释（命中文件+相关度+命中词）"),
+        session_file: Optional[str] = typer.Option(None, "--session", help="对话历史持久化文件（JSON）：进入时载入、每轮后保存，支持跨重启续聊"),
 ):
     """进入交互式多轮对话，每轮都带上检索到的上下文。输入 exit/quit 退出。"""
     if not no_context and not _require_index():
@@ -429,21 +478,28 @@ def chat(
     cfg = _build_config(model, base_url, api_key)
     sp = _resolve_system_prompt(system_prompt, system_prompt_file)
     typer.echo("💬 进入对话模式（输入 exit 或 quit 退出）：")
-    history: list[dict] = []
+    # R1 新能力：从持久化文件恢复多轮历史，使对话可跨 CLI 重启续聊
+    history: list[dict] = load_session(session_file) if session_file else []
     while True:
         try:
             question = input("你> ").strip()
         except (EOFError, KeyboardInterrupt):
             typer.echo("\n👋 再见。")
+            if session_file:
+                save_session(session_file, history)
             break
         if not question:
             continue
         if question.lower() in ("exit", "quit", "q"):
             typer.echo("👋 再见。")
+            if session_file:
+                save_session(session_file, history)
             break
-        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context, verbose=verbose, max_context_chars=max_context_chars, stream=not no_stream)
+        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context, verbose=verbose, max_context_chars=max_context_chars, stream=not no_stream, explain=explain)
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": answer})
+        if session_file:
+            save_session(session_file, history)
         typer.echo("")
 
 

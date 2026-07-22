@@ -178,6 +178,22 @@ def test_build_context_max_context_chars_override(tmp_path, monkeypatch):
     assert len(text_tiny) < len(text_default)  # 更小的预算产出更短的上下文
 
 
+def test_explain_retrieval_orders_terms_by_freq(tmp_path, monkeypatch):
+    """R2 一致性验证：命中词按查询词频降序（与打分一致）。"""
+    from index_store import IndexEntry, save_index
+
+    save_index(
+        [IndexEntry(path="a.py", size=10, snippet="python python java function")],
+        str(tmp_path),
+    )
+    monkeypatch.chdir(tmp_path)
+    hits = explain_retrieval("python python java", top_k=5)
+    assert hits
+    h = hits[0]
+    # "python" 在查询里出现 2 次，应排在同文件的命中词首位
+    assert h["terms"][0] == "python"
+
+
 def test_search_index_finds_match(tmp_path):
     entries = [IndexEntry(path="foo.py", size=10, snippet="def hello(): pass")]
     save_index(entries, str(tmp_path))
