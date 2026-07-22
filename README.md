@@ -103,3 +103,10 @@ cli-agent/
 - `index` 新增 `--ext` 扩展名白名单过滤（如 `--ext .py,.md`）
 - 简化 TF-IDF 检索，零向量库依赖；离线 `MOCK_LLM=1` 冒烟可用
 - 附 `run.sh` / `run.bat` 一键示例
+
+## 依赖与降级
+
+- 运行时依赖见 `requirements.txt`（CLI 框架 + 轻量 LLM 客户端）。
+- 默认调用 LLM 接口；可通过环境变量 `MOCK_LLM=1` 切换为内置 mock 响应，**无需任何外部 LLM 服务即可跑通全流程与测试**。
+- 开发/测试依赖见 `requirements-dev.txt`（`pip install -r requirements-dev.txt`），运行 `python -m pytest tests -q` 复现测试。
+
