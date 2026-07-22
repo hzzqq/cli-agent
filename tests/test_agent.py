@@ -353,3 +353,35 @@ def test_index_incremental_no_old_index_message(tmp_path):
     )
     assert r.exit_code == 0
     assert "全量重建" in r.stdout
+
+
+def test_ask_verbose_prints_retrieval_stats(monkeypatch):
+    """R1 新需求验证：--verbose 打印检索概况。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("这是一段上下文内容", ["a.py", "b.py"]))
+
+    def fake_complete(self, messages, context_files=None, system_prompt=None):
+        return "答案"
+
+    monkeypatch.setattr(agent.LLMClient, "complete", fake_complete)
+    r = runner.invoke(agent.app, ["ask", "问题", "--verbose"])
+    assert r.exit_code == 0
+    assert "检索" in r.stdout
+    assert "2 个文件" in r.stdout
+    assert "字符" in r.stdout
+
+
+def test_ask_no_hits_warns_ungrounded(monkeypatch):
+    """R2 隐性问题验证：检索无命中时应告警，提示答案未接地。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("", []))
+
+    def fake_complete(self, messages, context_files=None, system_prompt=None):
+        return "答案"
+
+    monkeypatch.setattr(agent.LLMClient, "complete", fake_complete)
+    r = runner.invoke(agent.app, ["ask", "问题"])
+    assert r.exit_code == 0
+    assert "未检索到相关文件" in (r.stderr or r.stdout)

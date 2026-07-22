@@ -99,12 +99,25 @@ def _do_ask(
     system_prompt: Optional[str] = None,
     no_context: bool = False,
     save_path: Optional[str] = None,
+    verbose: bool = False,
 ):
     # 隐性问题：--no-context 下不应再强制检索，否则会为「纯通用问题」无谓加载索引
     if no_context:
         context_text, paths = "", []
     else:
         context_text, paths = build_context(question, top_k=top_k, min_score=min_score)
+    # R1 可观测性：--verbose 展示检索概况，便于排查召回质量
+    if verbose:
+        n_chars = len(context_text)
+        est = LLMClient.estimate_tokens(context_text) if context_text else 0
+        typer.echo(f"🔎 检索：命中 {len(paths)} 个文件，上下文 {n_chars} 字符（约 {est} token）")
+    # 隐性问题：检索无命中时 LLM 仍正常作答，但用户无从得知答案「未接地」，
+    # 这里显式告警，避免把纯模型臆测误认为基于仓库的回答。
+    if not no_context and not paths:
+        typer.echo(
+            "⚠️ 未检索到相关文件，将仅凭 LLM 已有知识作答（可尝试调整问题或重新运行 index）",
+            err=True,
+        )
     client = LLMClient(config)
     # 多轮时把历史 + 当前问题（含检索上下文）组装成 messages 传给 complete，
     # 使 chat 真正具备「多轮记忆」，而非每轮只看当前问题（隐性正确性缺陷）。
@@ -196,6 +209,7 @@ def ask(
     no_context: bool = typer.Option(False, "--no-context", help="跳过仓库检索，直接把问题交给 LLM（适用于无需代码上下文的通用问题）"),
     question_file: Optional[str] = typer.Option(None, "--file", help="从文件读取问题（支持长/多行问题，优先于位置参数与管道）"),
     save_path: Optional[str] = typer.Option(None, "--save", help="把答案写入指定文件（便于脚本化消费/归档）"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="打印检索概况（命中文件数 / 上下文字符数 / 估算 token）"),
 ):
     """基于索引检索相关文件并调用 LLM 作答。"""
     # 问题来源优先级：--file > 位置参数 > 管道（stdin）
@@ -217,7 +231,7 @@ def ask(
     sp = _resolve_system_prompt(system_prompt, system_prompt_file)
     _do_ask(
         question, top_k, config=cfg, as_json=as_json, min_score=min_score,
-        system_prompt=sp, no_context=no_context, save_path=save_path,
+        system_prompt=sp, no_context=no_context, save_path=save_path, verbose=verbose,
     )
 
 
@@ -385,6 +399,7 @@ def chat(
     system_prompt: Optional[str] = typer.Option(None, "--system-prompt", help="自定义系统提示（内联），覆盖默认助手提示"),
     system_prompt_file: Optional[str] = typer.Option(None, "--system-prompt-file", help="从文件读取系统提示（优先于 --system-prompt）"),
     no_context: bool = typer.Option(False, "--no-context", help="跳过仓库检索，每轮直接把问题交给 LLM（纯通用对话）"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="打印检索概况（命中文件数 / 上下文字符数 / 估算 token）"),
 ):
     """进入交互式多轮对话，每轮都带上检索到的上下文。输入 exit/quit 退出。"""
     if not no_context and not _require_index():
@@ -404,7 +419,7 @@ def chat(
         if question.lower() in ("exit", "quit", "q"):
             typer.echo("👋 再见。")
             break
-        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context)
+        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context, verbose=verbose)
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": answer})
         typer.echo("")
