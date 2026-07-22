@@ -35,13 +35,24 @@ app = typer.Typer(
 
 
 def _require_index() -> bool:
-    """检查是否已建索引，未建则打印友好提示并返回 False。"""
+    """检查是否已建索引，未建则打印友好提示并返回 False。
+
+    隐性问题：原先索引文件存在但已损坏（无法解析）时，load_index 静默返回
+    []，导致提示误报「尚未发现索引文件」，误导用户以为是没建索引。这里
+    通过 os.path.exists 区分「未建」与「已损坏」，给出准确诊断。
+    """
     if not load_index():
-        typer.echo(
-            f"⚠️  尚未发现索引文件（{INDEX_FILE}）。\n"
-            "请先运行：python agent.py index <目录>\n"
-            "例如：python agent.py index ."
-        )
+        if os.path.exists(INDEX_FILE):
+            typer.echo(
+                f"⚠️  索引文件（{INDEX_FILE}）存在但无法解析（可能已损坏）。\n"
+                "请重新运行：python agent.py index <目录>"
+            )
+        else:
+            typer.echo(
+                f"⚠️  尚未发现索引文件（{INDEX_FILE}）。\n"
+                "请先运行：python agent.py index <目录>\n"
+                "例如：python agent.py index ."
+            )
         return False
     return True
 
@@ -296,6 +307,25 @@ def stats(
     typer.echo("  扩展名分布：")
     for ext, cnt in s["top_extensions"][:10]:
         typer.echo(f"    {ext}: {cnt}")
+
+
+@app.command()
+def config(
+    model: Optional[str] = typer.Option(None, "--model", help="覆盖模型名（仅用于预览生效值，不持久化）"),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="覆盖 API 地址（仅用于预览生效值）"),
+    api_key: Optional[str] = typer.Option(None, "--api-key", help="覆盖 API Key（仅用于预览生效值）"),
+):
+    """展示当前生效的 LLM 配置（环境变量与默认值合并后的结果，可观测性）。"""
+    cfg = _build_config(model, base_url, api_key) or LLMConfig()
+    typer.echo("⚙️  当前 LLM 配置（环境变量 + 默认值合并后）：")
+    typer.echo(f"  base_url   : {cfg.base_url}")
+    typer.echo(f"  model      : {cfg.model}")
+    typer.echo(f"  mock       : {cfg.mock}")
+    typer.echo(f"  timeout    : {cfg.timeout}s")
+    typer.echo(f"  max_tokens : {cfg.max_tokens}")
+    typer.echo(f"  temperature: {cfg.temperature}")
+    typer.echo(f"  retries    : {cfg.retries}（退避基数 {cfg.backoff}s）")
+    typer.echo(f"  api_key    : {'<已设置>' if cfg.api_key else '<未设置>'}")
 
 
 @app.command()

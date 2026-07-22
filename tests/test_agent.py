@@ -273,3 +273,23 @@ def test_ask_save_writes_answer_file(monkeypatch, tmp_path):
     r = runner.invoke(agent.app, ["ask", "问题", "--save", str(out)])
     assert r.exit_code == 0
     assert out.read_text(encoding="utf-8") == "这是答案"
+
+
+def test_config_command_shows_effective_settings(monkeypatch):
+    """R1 新需求验证：config 命令展示生效的 LLM 配置。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    r = runner.invoke(agent.app, ["config"])
+    assert r.exit_code == 0
+    assert "当前 LLM 配置" in r.stdout
+    assert "base_url" in r.stdout
+    assert "model" in r.stdout
+
+
+def test_require_index_reports_corrupt_not_missing(tmp_path, monkeypatch):
+    """R2 隐性问题验证：索引文件存在但损坏时，应提示「无法解析」而非「未发现」。"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".cliagent_index.json").write_text("{ 这不是合法 json")
+    r = runner.invoke(agent.app, ["ask", "问题"])
+    assert r.exit_code == 1
+    assert "无法解析" in (r.stderr or r.stdout)
+    assert "尚未发现" not in (r.stderr or r.stdout)
