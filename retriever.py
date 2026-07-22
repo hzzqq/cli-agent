@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 from collections import Counter
 from typing import List
@@ -110,6 +111,29 @@ def retrieve_scored(question: str, top_k: int = 5, min_score: float = 0.0):
 def retrieve(question: str, top_k: int = 5, min_score: float = 0.0) -> List[IndexEntry]:
     """根据问题召回 top-K 相关文件。找不到索引时返回空列表。"""
     return [e for e, _ in retrieve_scored(question, top_k=top_k, min_score=min_score)]
+
+
+def find_related(
+    content: str, target_path: str, top_k: int = 5, min_score: float = 0.0
+) -> "List[tuple]":
+    """找出与给定文件内容最相似的索引文件（排除自身），返回 [(entry, score)]。
+
+    R2 修复（隐性正确性缺陷）：原 `related` 命令直接用 `e.path != file` 排除自身，
+    而 `file` 是用户传入的原始路径（可能是 `./agent.py`、绝对路径、或仅文件名），
+    索引里存储的 `entry.path` 多为相对路径——两者形式不一致时「排除自身」失效，
+    目标文件本身会被当作「最相似」返回，结论失真。
+
+    这里对 `target_path` 做归一化（abspath / 相对 cwd 的 relpath / basename 三种形态）
+    后再与每个 entry.path 比较，确保任意路径写法下都能可靠排除自身。
+    """
+    hits = retrieve_scored(content, top_k=top_k + 1, min_score=min_score)
+    targets = {target_path, os.path.abspath(target_path), os.path.basename(target_path)}
+    try:
+        targets.add(os.path.relpath(os.path.abspath(target_path)))
+    except ValueError:
+        pass
+    rel = [(e, s) for e, s in hits if e.path not in targets]
+    return rel[:top_k]
 
 
 def explain_retrieval(question: str, top_k: int = 5, min_score: float = 0.0) -> List[dict]:

@@ -484,7 +484,7 @@ def related(
     R1 新能力：快速定位「哪些文件与当前文件高度相关」，适用于重构时评估
     影响面、寻找可复用模块、或理解某文件在仓库中的关联结构。
     """
-    from retriever import retrieve_scored
+    from retriever import find_related
 
     p = Path(file)
     if not p.exists():
@@ -500,9 +500,9 @@ def related(
     # 复用与 ask 一致的索引前置检查（区分未建 / 已损坏）
     if not _require_index():
         raise typer.Exit(code=1)
-    hits = retrieve_scored(content, top_k=top_k + 1)
-    # 排除文件自身（其内容必然与自身最相似）
-    rel = [(e, s) for e, s in hits if e.path != file][:top_k]
+    # R2 修复：find_related 对目标路径做归一化后排除自身，避免不同路径写法
+    # 导致目标文件被当作「最相似」返回（详见 retriever.find_related 注释）
+    rel = find_related(content, file, top_k=top_k)
     if not rel:
         if as_json:
             typer.echo(_json.dumps([], ensure_ascii=False))

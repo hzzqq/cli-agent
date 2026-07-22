@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from index_store import INDEX_FILE, IndexEntry, save_index, load_index, search_index, prune_missing  # noqa: E402
-from retriever import MAX_CONTEXT_CHARS, _tokenize, build_context, retrieve, retrieve_scored, explain_retrieval  # noqa: E402
+from retriever import MAX_CONTEXT_CHARS, _tokenize, build_context, retrieve, retrieve_scored, explain_retrieval, find_related  # noqa: E402
 
 
 @pytest.fixture
@@ -266,3 +266,35 @@ def test_retrieve_excludes_zero_relevance(tmp_path, monkeypatch):
     paths = [e.path for e in hits]
     assert "match.py" in paths
     assert "unrelated.py" not in paths
+
+
+def test_find_related_excludes_self(tmp_path, monkeypatch):
+    """R2 修复验证：find_related 对目标路径做归一化后排除自身，
+    无论用户用哪种路径写法（相对/./前缀/绝对/仅文件名）都不应把目标文件返回为「最相似」。"""
+    entries = [
+        IndexEntry(path="target.py", size=30, snippet="def target_func(): pass"),
+        IndexEntry(path="other.py", size=30, snippet="def target_func(): pass\ndef other_func(): pass"),
+        IndexEntry(path="unrelated.py", size=10, snippet="zzz qqq vvv"),
+    ]
+    save_index(entries, str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    content = "def target_func(): pass"
+    for form in ("target.py", "./target.py", str(tmp_path / "target.py")):
+        rel = find_related(content, form, top_k=5)
+        paths = [e.path for e, _ in rel]
+        assert "target.py" not in paths, f"路径写法 {form!r} 未排除自身"
+        assert "other.py" in paths, f"路径写法 {form!r} 未召回相似文件 other.py"
+
+
+def test_find_related_top_k(tmp_path, monkeypatch):
+    entries = [
+        IndexEntry(path="target.py", size=30, snippet="def target_func(): pass"),
+        IndexEntry(path="a.py", size=30, snippet="def target_func(): pass\ndef a(): pass"),
+        IndexEntry(path="b.py", size=30, snippet="def target_func(): pass\ndef b(): pass"),
+        IndexEntry(path="c.py", size=30, snippet="def target_func(): pass\ndef c(): pass"),
+    ]
+    save_index(entries, str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    rel = find_related("def target_func(): pass", "target.py", top_k=2)
+    assert len(rel) == 2  # 不超过 top_k（已排除自身）
+    assert all(e.path != "target.py" for e, _ in rel)
