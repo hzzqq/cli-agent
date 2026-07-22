@@ -70,6 +70,35 @@ class LLMClient:
         self.last_attempts: int = 0             # 可观测性：最近一次调用实际尝试次数
         self.last_error: Optional[str] = None   # 可观测性：最近一次失败原因（成功则为 None）
 
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
+        """粗略估算 token 数（供上下文预算评估 / 可观测性）。
+
+        中文/日文等 CJK 字符按「每字 1 token」估算（与主流 tokenizer 接近）；
+        其它字符按「每 4 字符 ≈ 1 token」估算。结果向上取整，至少为 0。
+        """
+        if not text:
+            return 0
+        cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+        others = len(text) - cjk
+        return cjk + (others + 3) // 4
+
+    @staticmethod
+    def _validate_messages(messages: List[dict]) -> None:
+        """校验 messages 结构，避免把畸形消息直接丢给 SDK 触发 5xx。
+
+        非法（缺 role/content、role 不在白名单、非 dict）一律包装为 LLMError。
+        """
+        valid_roles = {"system", "user", "assistant"}
+        for i, m in enumerate(messages):
+            if not isinstance(m, dict):
+                raise LLMError(f"消息 #{i} 不是对象：{type(m).__name__}")
+            role = m.get("role")
+            if role not in valid_roles:
+                raise LLMError(f"消息 #{i} 的 role 非法：{role!r}（应为 system/user/assistant）")
+            if not isinstance(m.get("content"), str):
+                raise LLMError(f"消息 #{i}（role={role}）缺少字符串 content")
+
     def _get_client(self):
         if self._client is None:
             try:
@@ -103,6 +132,9 @@ class LLMClient:
         if not messages:
             # 隐性健壮性：空消息列表既无意义也可能让部分 SDK 报错，提前拦截
             raise LLMError("消息列表为空，无法调用 LLM")
+
+        # 隐性健壮性：畸形消息（非法 role / 缺 content）提前拦截，避免触发 SDK 5xx
+        self._validate_messages(messages)
 
         if self.config.mock:
             question = ""

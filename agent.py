@@ -18,6 +18,7 @@ from __future__ import annotations
 import json as _json
 import os
 import sys
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -64,6 +65,19 @@ def _build_config(
     return cfg
 
 
+def _resolve_system_prompt(
+    inline: Optional[str], file_path: Optional[str]
+) -> "Optional[str]":
+    """解析系统提示来源：文件优先，其次内联文本，均无则返回 None（沿用默认）。"""
+    if file_path:
+        try:
+            return Path(file_path).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            typer.echo(f"⚠️ 无法读取系统提示文件：{exc}", err=True)
+            raise typer.Exit(code=1)
+    return inline or None
+
+
 def _do_ask(
     question: str,
     top_k: int,
@@ -71,6 +85,7 @@ def _do_ask(
     as_json: bool = False,
     min_score: float = 0.0,
     history: "list[dict] | None" = None,
+    system_prompt: Optional[str] = None,
 ):
     context_text, paths = build_context(question, top_k=top_k, min_score=min_score)
     client = LLMClient(config)
@@ -83,7 +98,8 @@ def _do_ask(
     )
     messages = list(history or []) + [{"role": "user", "content": user_content}]
     try:
-        answer = client.complete(messages, context_files=paths)
+        # 自定义系统提示透传给 complete（CLI 此前未暴露该能力，提示工程不可控）
+        answer = client.complete(messages, context_files=paths, system_prompt=system_prompt)
     except LLMError as exc:  # 隐性问题：未捕获则向用户抛出裸栈
         typer.echo(f"⚠️ 调用 LLM 失败：{exc}", err=True)
         raise typer.Exit(code=1)

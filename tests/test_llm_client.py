@@ -244,3 +244,28 @@ def test_non_transient_no_retry(monkeypatch):
         client.answer("问题", ["a.py"], "ctx")
     assert "已重试" not in str(exc.value)   # 非瞬态，未进入重试
     assert client.last_attempts == 1
+
+
+def test_estimate_tokens_cjk_and_latin():
+    """R1 新需求验证：中文按字计、拉丁按 ~4 字符/token 估算。"""
+    assert LLMClient.estimate_tokens("你好世界") == 4          # 4 个 CJK 字
+    assert LLMClient.estimate_tokens("hello world") == 3       # 11 字符 /4 上取整
+    assert LLMClient.estimate_tokens("") == 0
+    assert LLMClient.estimate_tokens("a" * 40) == 10           # 40/4
+
+
+def test_validate_messages_rejects_bad_role_and_missing_content():
+    """R2 隐性健壮性：畸形 messages 应在调用前被拦截为 LLMError，而非触发 SDK 5xx。"""
+    with pytest.raises(LLMError):
+        LLMClient._validate_messages([{"role": "god", "content": "x"}])
+    with pytest.raises(LLMError):
+        LLMClient._validate_messages([{"role": "user"}])  # 缺 content
+    with pytest.raises(LLMError):
+        LLMClient._validate_messages(["not-a-dict"])
+
+
+def test_complete_validates_before_mock():
+    """complete 在 mock 路径前也校验消息结构。"""
+    client = LLMClient(LLMConfig(mock=True))
+    with pytest.raises(LLMError):
+        client.complete([{"role": "user", "content": 123}])  # content 非字符串
