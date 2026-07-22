@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import fnmatch
 import json
 import os
 from collections import Counter
@@ -80,6 +81,7 @@ def build_index(
     exts: "set[str] | None" = None,
     max_size: "int | None" = None,
     prev: "List[IndexEntry] | None" = None,
+    exclude: "list[str] | None" = None,
 ) -> "tuple[List[IndexEntry], List[dict]]":
     """遍历 root，建立索引并返回 (条目列表, 跳过列表)。
 
@@ -87,9 +89,11 @@ def build_index(
     max_size：可选单文件字节上限；超过的文件被跳过（避免大锁文件/数据文件污染索引）。
     prev：上一轮索引条目；提供时进入「增量模式」——mtime 与 size 均未变的文件直接
         复用旧条目（不重读 snippet），显著减少大仓库的重复 I/O（隐性性能悬崖）。
+    exclude：可选忽略模式列表（fnmatch，支持相对路径或文件名，如 ["tests/*", "*.min.js"]），
+        匹配的文件跳过且不进入索引（R1 新能力，补充固定 SKIP_DIRS 之外的临时忽略需求）。
 
     返回的 skipped 为 [{path, reason, ...}]，reason ∈
-    {"unsupported_ext", "ext_filter", "too_large", "unreadable"}，
+    {"unsupported_ext", "ext_filter", "too_large", "unreadable", "excluded"}，
     便于 CLI 向用户公示「哪些文件没被索引」以提升可观测性。
     """
     prev_by_path = {e.path: e for e in (prev or [])}
@@ -97,6 +101,16 @@ def build_index(
     skipped: List[dict] = []
     for path in _iter_files(root):
         ext = os.path.splitext(path)[1].lower()
+        # R1 新能力：用户自定义忽略模式（在扩展名判断之前生效，优先级高于类型匹配）
+        if exclude:
+            rel = os.path.relpath(path, root)
+            base = os.path.basename(path)
+            if any(
+                fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(base, pat)
+                for pat in exclude
+            ):
+                skipped.append({"path": path, "reason": "excluded"})
+                continue
         if exts is not None and ext not in exts:
             skipped.append({"path": path, "reason": "ext_filter"})
             continue
@@ -174,14 +188,26 @@ def prune_missing(root: str, index_path: str = INDEX_FILE) -> int:
     """移除索引中已不存在的文件条目（陈旧索引清理），返回被移除数量。
 
     就地重写索引；无匹配时不动文件。
+
+    R2 修复（隐性正确性缺陷）：原实现对 `e.path` 直接 `os.path.exists`，
+    而 build_index 写入的 path 多为相对路径（相对当初建索引时的 root），
+    若从另一个 cwd 运行 `prune --root X`，相对路径会按「当前 cwd」解析，
+    导致本应保留的文件被误判为「已删除」而错误清除。
+    现把相对路径按传入的 root 重新拼接后再判存在，`root` 参数也真正被使用。
     """
     entries = load_index(index_path)
     if not entries:
         return 0
-    kept = [e for e in entries if os.path.exists(e.path)]
+    out_dir = os.path.dirname(os.path.abspath(index_path)) or "."
+    kept = []
+    for e in entries:
+        p = e.path
+        if not os.path.isabs(p):
+            p = os.path.join(root, p)
+        if os.path.exists(p):
+            kept.append(e)
     removed = len(entries) - len(kept)
     if removed:
-        out_dir = os.path.dirname(os.path.abspath(index_path)) or "."
         save_index(kept, out_dir)
     return removed
 

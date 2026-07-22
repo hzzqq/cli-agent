@@ -246,6 +246,9 @@ def index(
     incremental: bool = typer.Option(
         False, "--incremental", help="增量重建：未变更（mtime/size 不变）的文件直接复用旧索引，省去重复 I/O"
     ),
+    exclude: Optional[str] = typer.Option(
+        None, "--exclude", help="忽略模式（逗号分隔，fnmatch）：相对路径或文件名匹配则跳过，如 'tests/*,*.min.js'"
+    ),
 ):
     """递归遍历目录，建立文本文件索引。"""
     # R2 修复（隐性可观测性/失败快速）：原实现对不存在的目录静默执行，
@@ -267,7 +270,12 @@ def index(
             typer.echo(f"♻️  增量模式：载入旧索引 {len(prev)} 条，复用未变更文件")
         else:
             typer.echo("♻️  增量模式：未发现旧索引，将执行全量重建")
-    entries, skipped = build_index(path, exts=exts, max_size=max_size, prev=prev)
+    exclude_list = None
+    if exclude:
+        # 解析逗号分隔的忽略模式；逐个 strip 以容忍 "tests/* ,*.min.js" 这类空格
+        exclude_list = [e.strip() for e in exclude.split(",") if e.strip()]
+        typer.echo(f"🚫 忽略模式：{', '.join(exclude_list)}")
+    entries, skipped = build_index(path, exts=exts, max_size=max_size, prev=prev, exclude=exclude_list)
     out = save_index(entries, root)
     typer.echo(f"✅ 已索引 {len(entries)} 个文件，索引保存到 {out}")
     if skipped:

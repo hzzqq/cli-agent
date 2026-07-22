@@ -134,6 +134,83 @@ def test_index_stats_missing_file_returns_none(tmp_path):
     assert index_stats(str(tmp_path / "nope.json")) is None
 
 
+def test_build_index_exclude_by_relpath(tmp_path):
+    """R1 新需求：--exclude 按相对路径 fnmatch 忽略文件（如 'tests/*'）。"""
+    (tmp_path / "a.py").write_text("x = 1")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_a.py").write_text("def test_a(): pass")
+    entries, skipped = build_index(str(tmp_path), exclude=["tests/*"])
+    paths = {e.path for e in entries}
+    assert str(tmp_path / "a.py") in paths
+    assert str(tests_dir / "test_a.py") not in paths
+    ex = [s for s in skipped if s["reason"] == "excluded"]
+    assert ex and ex[0]["path"].endswith("test_a.py")
+
+
+def test_build_index_exclude_by_basename(tmp_path):
+    """R1 新需求：--exclude 也支持按文件名模式忽略（如 '*.min.js'）。"""
+    (tmp_path / "app.js").write_text("console.log(1)")
+    (tmp_path / "app.min.js").write_text("// minified")
+    entries, skipped = build_index(str(tmp_path), exclude=["*.min.js"])
+    paths = {e.path for e in entries}
+    assert str(tmp_path / "app.js") in paths
+    assert str(tmp_path / "app.min.js") not in paths
+    assert any(s["reason"] == "excluded" and s["path"].endswith("app.min.js") for s in skipped)
+
+
+def test_index_command_exclude_flag(tmp_path):
+    """端到端：CLI --exclude 应公示忽略模式并跳过匹配文件。"""
+    (tmp_path / "a.py").write_text("x = 1")
+    (tmp_path / "vendor.py").write_text("y = 2")
+    r = runner.invoke(
+        agent.app,
+        ["index", str(tmp_path), "--root", str(tmp_path), "--exclude", "vendor.py"],
+    )
+    assert r.exit_code == 0
+    assert "已索引 1 个文件" in r.stdout
+    assert "excluded" in r.stdout
+
+
+def test_prune_missing_respects_root_cwd(tmp_path, monkeypatch):
+    """R2 修复验证：从非 root 的 cwd 运行 prune，相对路径应按 root 解析，
+    不得误删仍存在的文件（旧实现对相对 path 直接用当前 cwd 判存在）。"""
+    from index_store import (
+        save_index,
+        prune_missing,
+        IndexEntry,
+        load_index,
+        INDEX_FILE,
+    )
+
+    (tmp_path / "keep.py").write_text("x = 1")
+    (tmp_path / "gone.py").write_text("y = 2")
+    save_index(
+        [
+            IndexEntry(path="keep.py", size=6, snippet="x=1"),
+            IndexEntry(path="gone.py", size=5, snippet="y=2"),
+        ],
+        str(tmp_path),
+    )
+    # 删除 gone.py 制造「已删除」条目
+    (tmp_path / "gone.py").unlink()
+
+    # 切换到与 root 不同的工作目录，再执行 prune
+    other = tmp_path / "other_dir"
+    other.mkdir()
+    monkeypatch.chdir(other)
+
+    removed = prune_missing(str(tmp_path), str(tmp_path / INDEX_FILE))
+    assert removed == 1  # 只移除真正删除的 gone.py
+
+    # 切回 root 验证 prune 后 keep.py 仍保留、gone.py 被删除
+    monkeypatch.chdir(tmp_path)
+    entries = load_index(str(tmp_path / INDEX_FILE))
+    kept_paths = {e.path for e in entries}
+    assert "keep.py" in kept_paths
+    assert "gone.py" not in kept_paths
+
+
 def test_load_index_skips_malformed_entries(tmp_path):
     """R2 验证：单条条目损坏（如缺 snippet）不应拖垮整个索引，只跳过坏条目。
 
