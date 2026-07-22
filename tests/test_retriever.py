@@ -102,7 +102,9 @@ def test_build_context_caps_single_block(tmp_path, monkeypatch):
 
     huge = "x" * (MAX_BLOCK_CHARS * 4)  # 远超单块上限
     entries = [
-        IndexEntry(path="huge.py", size=9999, snippet=huge),
+        # 让巨型文件「相关」（含查询词），才会被召回并触发截断；
+        # 无关巨型文件现会被零相关门槛排除，不再污染上下文。
+        IndexEntry(path="huge.py", size=9999, snippet="foo function " + huge),
         IndexEntry(path="small.py", size=10, snippet="foo bar function"),
     ]
     save_index(entries, str(tmp_path))
@@ -249,3 +251,18 @@ def test_prune_missing_removes_gone_file(tmp_path):
     remaining = load_index(str(tmp_path / INDEX_FILE))
     assert [e.path for e in remaining] == [str(keep)]
 
+
+
+def test_retrieve_excludes_zero_relevance(tmp_path, monkeypatch):
+    """R2 修复验证：与查询零相关的文件（score=0）即便 top_k 很大也不应进入结果，
+    避免无关文件挤占名额、污染 LLM 上下文。"""
+    entries = [
+        IndexEntry(path="match.py", size=10, snippet="alpha beta gamma"),
+        IndexEntry(path="unrelated.py", size=10, snippet="zzz qqq vvv"),
+    ]
+    save_index(entries, str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    hits = retrieve("alpha beta gamma", top_k=10)
+    paths = [e.path for e in hits]
+    assert "match.py" in paths
+    assert "unrelated.py" not in paths

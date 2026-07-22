@@ -298,6 +298,31 @@ def context(
         typer.echo(text[:2000])
 
 
+@app.command()
+def explain(
+    question: str = typer.Argument(..., help="要解释检索的问题，用引号包裹"),
+    top_k: int = typer.Option(5, "--top-k", "-k", help="召回的相关文件数量"),
+    min_score: float = typer.Option(0.0, "--min-score", help="最低相关度阈值，过滤弱相关文件"),
+):
+    """展示「为什么召回了这些文件」：命中文件 + 相关度 + 命中关键词（不调用 LLM）。
+
+    与 context/search 类似，explain 只做检索解释、不消耗 LLM 额度，
+    适合排查检索质量、核对参考来源，或在提交问题前确认召回是否合理。
+    """
+    if not _require_index():
+        raise typer.Exit(code=1)
+    from retriever import explain_retrieval
+
+    hits = explain_retrieval(question, top_k=top_k, min_score=min_score)
+    if not hits:
+        typer.echo("🔎 未检索到相关文件，请确认索引已建立且问题与仓库内容相关。")
+        raise typer.Exit(code=1)
+    typer.echo(f"🔎 针对问题「{question}」共召回 {len(hits)} 个文件：")
+    for h in hits:
+        terms = "、".join(h["terms"]) or "（无显式关键词匹配）"
+        typer.echo(f"  {h['score']:.2f}　{h['path']}　命中词：{terms}")
+
+
 def _excerpt(text: str, keyword: str, width: int = 60) -> str:
     """截取包含关键词的一小段上下文，便于用户确认命中位置。"""
     if not text:
@@ -375,6 +400,46 @@ def search(
         excerpt = _excerpt(e.snippet or "", keyword)
         if excerpt:
             typer.echo(f"      …{excerpt}…")
+
+
+@app.command()
+def related(
+    file: str = typer.Argument(..., help="要查「相似文件」的目标文件路径"),
+    top_k: int = typer.Option(5, "--top-k", "-k", help="返回的最相似文件数量"),
+    max_size: Optional[int] = typer.Option(
+        None, "--max-size", help="仅读取文件前 N 字节作为内容样本（避免大文件读全量）"
+    ),
+):
+    """找出与给定文件内容最相似的索引文件（不调用 LLM，基于 BM25 词重叠）。
+
+    R1 新能力：快速定位「哪些文件与当前文件高度相关」，适用于重构时评估
+    影响面、寻找可复用模块、或理解某文件在仓库中的关联结构。
+    """
+    from retriever import retrieve_scored
+
+    p = Path(file)
+    if not p.exists():
+        typer.echo(f"⚠️  文件不存在：{file}")
+        raise typer.Exit(code=1)
+    try:
+        content = p.read_text(encoding="utf-8", errors="ignore")
+    except OSError as exc:
+        typer.echo(f"⚠️  无法读取文件：{exc}")
+        raise typer.Exit(code=1)
+    if max_size:
+        content = content[:max_size]
+    # 复用与 ask 一致的索引前置检查（区分未建 / 已损坏）
+    if not _require_index():
+        raise typer.Exit(code=1)
+    hits = retrieve_scored(content, top_k=top_k + 1)
+    # 排除文件自身（其内容必然与自身最相似）
+    rel = [(e, s) for e, s in hits if e.path != file][:top_k]
+    if not rel:
+        typer.echo("未找到相似文件（索引可能未包含足够的可比内容，或目标文件内容过于独特）。")
+        raise typer.Exit(code=1)
+    typer.echo(f"🔗 与 {file} 最相似的 {len(rel)} 个文件：")
+    for e, s in rel:
+        typer.echo(f"  {s:.2f}　{e.path}")
 
 
 @app.command()

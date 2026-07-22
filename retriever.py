@@ -95,7 +95,12 @@ def retrieve_scored(question: str, top_k: int = 5, min_score: float = 0.0):
                 idf_cache[qt] = _idf(qt, docs_tokens)
             # TF-IDF（含查询侧词频 qf）：重复提问同一关键词时该文件得分更高
             score += qf * (tf[qt] / max(len(toks), 1)) * idf_cache[qt]
-        if score >= min_score:
+        # R2 修复（隐性相关性缺陷）：原先以 `score >= min_score` 作为门槛，
+        # 而 min_score 默认 0.0，导致与查询零相关（score 恰好为 0）的文件也会
+        # 被纳入候选、并可能挤占 top_k 名额进入 LLM 上下文——即便它们与问题
+        # 毫不相关。现要求 score > 0（确有匹配）才进入候选，min_score 再在其
+        # 上叠加更高阈值；零相关文件永不进入上下文。
+        if score > 0 and score >= min_score:
             scored.append((score, entry))
 
     scored.sort(key=lambda x: x[0], reverse=True)

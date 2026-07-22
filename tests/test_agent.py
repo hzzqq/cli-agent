@@ -175,6 +175,36 @@ def test_ask_explain_invokes_explanation(monkeypatch):
     assert "a.py" in r.stdout
 
 
+def test_explain_command_standalone(monkeypatch):
+    """R1 新需求验证：explain 独立命令展示「为什么召回这些文件」，不调用 LLM。"""
+    captured = {}
+
+    def fake_explain(q, top_k=5, min_score=0.0):
+        captured["q"] = q
+        captured["top_k"] = top_k
+        return [{"path": "a.py", "score": 0.9, "terms": ["foo"]},
+                {"path": "b.py", "score": 0.3, "terms": ["bar"]}]
+
+    monkeypatch.setattr(agent, "load_index", lambda *a, **k: [1])
+    monkeypatch.setattr(retriever, "explain_retrieval", fake_explain)
+    r = runner.invoke(agent.app, ["explain", "foo问题", "--top-k", "3"])
+    assert r.exit_code == 0
+    assert captured.get("q") == "foo问题"
+    assert captured.get("top_k") == 3
+    assert "共召回 2 个文件" in r.stdout
+    assert "a.py" in r.stdout and "b.py" in r.stdout
+    assert "foo" in r.stdout  # 命中词展示
+
+
+def test_explain_command_no_hit(monkeypatch):
+    """R2 验证：检索无命中时 explain 应友好退出（exit 1）而非空输出。"""
+    monkeypatch.setattr(agent, "load_index", lambda *a, **k: [1])
+    monkeypatch.setattr(retriever, "explain_retrieval", lambda *a, **k: [])
+    r = runner.invoke(agent.app, ["explain", "不相关问题"])
+    assert r.exit_code == 1
+    assert "未检索到" in r.stdout
+
+
 def test_search_command(monkeypatch, tmp_path):
     """R1 新需求验证：search 命令在索引中按关键词定位文件。"""
     from index_store import IndexEntry, save_index
@@ -505,3 +535,32 @@ def test_save_session_warns_on_failure(tmp_path, capsys):
     # 文件未创建（保存确实失败），但应有警告输出到 stderr
     captured = capsys.readouterr()
     assert "会话历史保存失败" in (captured.err or captured.out)
+
+
+def test_related_command_finds_similar(tmp_path, monkeypatch):
+    """R1 新需求验证：related 命令基于内容找出最相似索引文件，并排除自身。"""
+    from index_store import IndexEntry, save_index
+
+    save_index([
+        IndexEntry(path="target.py", size=10, snippet="def alpha(): pass"),
+        IndexEntry(path="sibling.py", size=10, snippet="def alpha(): return 1"),
+        IndexEntry(path="other.py", size=10, snippet="zzz qqq vvv"),
+    ], str(tmp_path))
+    (tmp_path / "target.py").write_text("def alpha(): pass", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    r = runner.invoke(agent.app, ["related", "target.py"])
+    assert r.exit_code == 0, r.stdout
+    assert "sibling.py" in r.stdout
+    # 自身不应作为相似结果出现：输出里 target.py 仅出现在标题行（被查文件），
+    # 不应出现在结果列表（分数 路径）中。
+    assert r.stdout.count("target.py") == 1
+
+
+def test_related_command_missing_file(tmp_path, monkeypatch):
+    from index_store import IndexEntry, save_index
+
+    save_index([IndexEntry(path="a.py", size=10, snippet="x")], str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    r = runner.invoke(agent.app, ["related", "nope.py"])
+    assert r.exit_code == 1
+    assert "文件不存在" in r.stdout
