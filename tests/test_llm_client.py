@@ -18,6 +18,56 @@ if str(ROOT) not in sys.path:
 from llm_client import LLMClient, LLMConfig, LLMError  # noqa: E402
 
 
+def test_stream_complete_mock_yields_full_text():
+    """R1 新需求验证：mock 下 stream_complete 逐字符产出且拼接==完整答案。"""
+    cli = LLMClient(LLMConfig(mock=True))
+    out = "".join(cli.stream_complete(
+        [{"role": "user", "content": "q"}], context_files=["a.py"]
+    ))
+    assert "MOCK" in out
+
+
+def test_stream_complete_validates_empty():
+    cli = LLMClient(LLMConfig(mock=True))
+    with pytest.raises(LLMError):
+        list(cli.stream_complete([]))
+
+
+def test_stream_complete_real_path(monkeypatch):
+    """真实路径：stream=True 应逐 token 产出来自 fake 客户端的片段。"""
+    captured = {}
+
+    class _FakeDelta:
+        def __init__(self, c): self.content = c
+
+    class _FakeChunk:
+        def __init__(self, c):
+            self.choices = [SimpleNamespace(delta=_FakeDelta(c))]
+
+    class _FakeStream:
+        def __init__(self): self._parts = ["你", "好", "世界"]
+        def __iter__(self):
+            for p in self._parts:
+                yield _FakeChunk(p)
+
+    class _FakeCompletions:
+        def create(self, **kw):
+            captured["stream"] = kw.get("stream")
+            return _FakeStream()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    cli = LLMClient(LLMConfig(mock=False))
+    monkeypatch.setattr(cli, "_get_client", lambda: _FakeClient())
+    pieces = list(cli.stream_complete([{"role": "user", "content": "hi"}]))
+    assert pieces == ["你", "好", "世界"]
+    assert captured["stream"] is True
+
+
 class _FakeCompletions:
     def __init__(self, content="ok", usage=None, raise_exc=None):
         self._content = content

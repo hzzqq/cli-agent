@@ -199,6 +199,56 @@ class LLMClient:
         suffix = f"（已重试 {retried} 次）" if retried > 0 else ""
         raise LLMError(f"LLM 调用失败{suffix}：{last_exc}") from last_exc
 
+    def stream_complete(
+        self,
+        messages: List[dict],
+        context_files: List[str] | None = None,
+        system_prompt: str | None = None,
+    ):
+        """流式多轮问答入口：逐 token 产出（generator），供 CLI 实时打印。
+
+        与 complete 的区别：complete 聚合后整体返回字符串；stream_complete
+        逐个 yield 片段，便于「边生成边显示」的交互体验（R1 新能力）。
+        失败时同样统一抛 LLMError（绝不裸抛 SDK 异常）。
+        """
+        if not messages:
+            raise LLMError("消息列表为空，无法调用 LLM")
+        self._validate_messages(messages)
+
+        if self.config.mock:
+            # 复用 complete（含其对 complete 的 mock 与全部可观测字段），
+            # 仅把结果逐字符 yield 出去；真实后端才走真正的增量流。
+            # 这样测试对 complete 的 mock 也能作用于流式路径。
+            ans = self.complete(
+                messages, context_files=context_files, system_prompt=system_prompt
+            )
+            for ch in ans:
+                yield ch
+            return
+
+        sys_prompt = system_prompt or (
+            "你是一个帮助理解代码仓库的助手。请基于下面提供的仓库上下文片段，"
+            "用中文准确、简洁地回答用户的问题。如果上下文不足以回答，请如实说明。"
+        )
+        full = [{"role": "system", "content": sys_prompt}] + list(messages)
+        client = self._get_client()
+        try:
+            stream = client.chat.completions.create(
+                model=self.config.model,
+                messages=full,
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+                stream=True,
+            )
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                piece = chunk.choices[0].delta.content or ""
+                if piece:
+                    yield piece
+        except Exception as exc:  # 流式失败也统一包装
+            raise LLMError(f"LLM 流式调用失败：{exc}") from exc
+
     @staticmethod
     def _is_transient(exc: Exception) -> bool:
         """判定异常是否为可重试的瞬态错误（网络抖动 / 限流 / 5xx）。"""

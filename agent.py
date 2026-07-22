@@ -101,6 +101,7 @@ def _do_ask(
     save_path: Optional[str] = None,
     verbose: bool = False,
     max_context_chars: int = 6000,
+    stream: bool = True,
 ):
     # 隐性问题：--no-context 下不应再强制检索，否则会为「纯通用问题」无谓加载索引
     if no_context:
@@ -131,8 +132,20 @@ def _do_ask(
     )
     messages = list(history or []) + [{"role": "user", "content": user_content}]
     try:
-        # 自定义系统提示透传给 complete（CLI 此前未暴露该能力，提示工程不可控）
-        answer = client.complete(messages, context_files=paths, system_prompt=system_prompt)
+        # --json 输出需整体 JSON，不能逐字打印污染结果，强制非流式
+        do_stream = stream and not as_json
+        if do_stream:
+            # R1 新能力：流式逐 token 打印（边生成边显示），提升交互体感
+            answer = ""
+            for piece in client.stream_complete(
+                messages, context_files=paths, system_prompt=system_prompt
+            ):
+                answer += piece
+                typer.echo(piece, nl=False)
+            typer.echo("")  # 换行，避免与后续「参考文件」粘连
+        else:
+            # 自定义系统提示透传给 complete（CLI 此前未暴露该能力，提示工程不可控）
+            answer = client.complete(messages, context_files=paths, system_prompt=system_prompt)
     except LLMError as exc:  # 隐性问题：未捕获则向用户抛出裸栈
         typer.echo(f"⚠️ 调用 LLM 失败：{exc}", err=True)
         raise typer.Exit(code=1)
@@ -213,7 +226,8 @@ def ask(
     question_file: Optional[str] = typer.Option(None, "--file", help="从文件读取问题（支持长/多行问题，优先于位置参数与管道）"),
     save_path: Optional[str] = typer.Option(None, "--save", help="把答案写入指定文件（便于脚本化消费/归档）"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="打印检索概况（命中文件数 / 上下文字符数 / 估算 token）"),
-    max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符），超出后停止追加更低相关文件"),
+        max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符），超出后停止追加更低相关文件"),
+        no_stream: bool = typer.Option(False, "--no-stream", help="关闭流式输出，等生成完毕后一次性打印（兼容管道/脚本）"),
 ):
     """基于索引检索相关文件并调用 LLM 作答。"""
     # 问题来源优先级：--file > 位置参数 > 管道（stdin）
@@ -236,7 +250,7 @@ def ask(
     _do_ask(
         question, top_k, config=cfg, as_json=as_json, min_score=min_score,
         system_prompt=sp, no_context=no_context, save_path=save_path, verbose=verbose,
-        max_context_chars=max_context_chars,
+        max_context_chars=max_context_chars, stream=not no_stream,
     )
 
 
@@ -406,7 +420,8 @@ def chat(
     system_prompt_file: Optional[str] = typer.Option(None, "--system-prompt-file", help="从文件读取系统提示（优先于 --system-prompt）"),
     no_context: bool = typer.Option(False, "--no-context", help="跳过仓库检索，每轮直接把问题交给 LLM（纯通用对话）"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="打印检索概况（命中文件数 / 上下文字符数 / 估算 token）"),
-    max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符），超出后停止追加更低相关文件"),
+        max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符），超出后停止追加更低相关文件"),
+        no_stream: bool = typer.Option(False, "--no-stream", help="关闭流式输出，等生成完毕后一次性打印"),
 ):
     """进入交互式多轮对话，每轮都带上检索到的上下文。输入 exit/quit 退出。"""
     if not no_context and not _require_index():
@@ -426,7 +441,7 @@ def chat(
         if question.lower() in ("exit", "quit", "q"):
             typer.echo("👋 再见。")
             break
-        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context, verbose=verbose, max_context_chars=max_context_chars)
+        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context, verbose=verbose, max_context_chars=max_context_chars, stream=not no_stream)
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": answer})
         typer.echo("")
