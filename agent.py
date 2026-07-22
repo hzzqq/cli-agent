@@ -70,11 +70,20 @@ def _do_ask(
     config: Optional[LLMConfig] = None,
     as_json: bool = False,
     min_score: float = 0.0,
+    history: "list[dict] | None" = None,
 ):
     context_text, paths = build_context(question, top_k=top_k, min_score=min_score)
     client = LLMClient(config)
+    # 多轮时把历史 + 当前问题（含检索上下文）组装成 messages 传给 complete，
+    # 使 chat 真正具备「多轮记忆」，而非每轮只看当前问题（隐性正确性缺陷）。
+    user_content = (
+        f"用户问题：{question}\n\n"
+        f"=== 仓库上下文（来自 {len(paths)} 个文件）===\n{context_text}\n"
+        "=== 上下文结束 ===\n请回答上面的问题。"
+    )
+    messages = list(history or []) + [{"role": "user", "content": user_content}]
     try:
-        answer = client.answer(question, paths, context_text)
+        answer = client.complete(messages, context_files=paths)
     except LLMError as exc:  # 隐性问题：未捕获则向用户抛出裸栈
         typer.echo(f"⚠️ 调用 LLM 失败：{exc}", err=True)
         raise typer.Exit(code=1)
@@ -87,6 +96,7 @@ def _do_ask(
             typer.echo("\n📚 参考文件：")
             for p in paths:
                 typer.echo(f"  - {p}")
+    return answer
 
 
 @app.command()
@@ -246,6 +256,7 @@ def chat(
         raise typer.Exit(code=1)
     cfg = _build_config(model, base_url, api_key)
     typer.echo("💬 进入对话模式（输入 exit 或 quit 退出）：")
+    history: list[dict] = []
     while True:
         try:
             question = input("你> ").strip()
@@ -257,7 +268,9 @@ def chat(
         if question.lower() in ("exit", "quit", "q"):
             typer.echo("👋 再见。")
             break
-        _do_ask(question, top_k, config=cfg)
+        answer = _do_ask(question, top_k, config=cfg, history=history)
+        history.append({"role": "user", "content": question})
+        history.append({"role": "assistant", "content": answer})
         typer.echo("")
 
 

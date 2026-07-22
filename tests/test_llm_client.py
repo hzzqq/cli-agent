@@ -149,3 +149,36 @@ def test_missing_openai_dependency_wrapped(monkeypatch):
     with pytest.raises(LLMError) as exc:
         client._get_client()
     assert "openai" in str(exc.value)
+
+
+def test_complete_multiturn_mock():
+    """R1 新需求验证：complete 接受多轮 messages，mock 下取最后一条 user 作为问题。"""
+    client = LLMClient(LLMConfig(mock=True))
+    out = client.complete([
+        {"role": "user", "content": "第一问"},
+        {"role": "assistant", "content": "答1"},
+        {"role": "user", "content": "第二问"},
+    ], context_files=["a.py"])
+    assert "MOCK" in out
+    assert "a.py" in out
+
+
+def test_complete_empty_messages_raises():
+    """R2 隐性健壮性：空消息列表应提前拦截并包装为 LLMError。"""
+    client = LLMClient(LLMConfig(mock=True))
+    with pytest.raises(LLMError):
+        client.complete([])
+
+
+def test_complete_passes_custom_system_prompt(monkeypatch, fake_ok_client):
+    """R1 灵活性验证：自定义 system_prompt 应出现在请求消息首位。"""
+    client = LLMClient(LLMConfig(mock=False))
+    monkeypatch.setattr(client, "_get_client", lambda: fake_ok_client)
+    client.complete(
+        [{"role": "user", "content": "hi"}],
+        system_prompt="你是测试助手",
+    )
+    call = fake_ok_client.chat.completions.calls[0]
+    assert call["messages"][0]["role"] == "system"
+    assert call["messages"][0]["content"] == "你是测试助手"
+    assert call["messages"][1]["content"] == "hi"

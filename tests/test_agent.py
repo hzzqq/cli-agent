@@ -44,10 +44,10 @@ def test_ask_handles_llm_error_gracefully(monkeypatch):
     monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
     monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0: ("ctx", ["a.py"]))
 
-    def boom(self, question, context_files, context_text):
+    def boom(self, messages, context_files=None, system_prompt=None):
         raise agent.LLMError("模拟网络错误")
 
-    monkeypatch.setattr(agent.LLMClient, "answer", boom)
+    monkeypatch.setattr(agent.LLMClient, "complete", boom)
     r = runner.invoke(agent.app, ["ask", "问题"])
     assert r.exit_code == 1
     assert "调用 LLM 失败" in (r.stderr or r.stdout)
@@ -60,6 +60,27 @@ def test_ask_mock_path_succeeds(monkeypatch):
     r = runner.invoke(agent.app, ["ask", "问题"])
     assert r.exit_code == 0
     assert "MOCK" in r.stdout
+
+
+def test_chat_is_multiturn(monkeypatch):
+    """R1 新需求验证：chat 把历史传入 LLM，实现真正的多轮记忆。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    captured = {}
+
+    def fake_complete(self, messages, context_files=None, system_prompt=None):
+        captured["messages"] = messages
+        return "答案"
+
+    monkeypatch.setattr(agent.LLMClient, "complete", fake_complete)
+    # 模拟两轮对话：第二轮应带上第一轮的 user+assistant 历史
+    r = runner.invoke(agent.app, ["chat"], input="第一轮\n第二轮\nexit\n")
+    assert r.exit_code == 0
+    msgs = captured["messages"]
+    roles = [m["role"] for m in msgs]
+    # 第二轮请求：system + 第一轮user + 第一轮assistant + 第二轮user
+    assert roles.count("user") == 2
+    assert "assistant" in roles
 
 
 def test_ask_min_score_passed_to_build_context(monkeypatch):

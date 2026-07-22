@@ -72,34 +72,43 @@ class LLMClient:
                 raise LLMError(f"初始化 LLM 客户端失败：{exc}") from exc
         return self._client
 
-    def answer(self, question: str, context_files: List[str], context_text: str) -> str:
-        """基于检索到的上下文作答。
+    def complete(
+        self,
+        messages: List[dict],
+        context_files: List[str] | None = None,
+        system_prompt: str | None = None,
+    ) -> str:
+        """底层多轮问答入口：直接接收已构造好的 messages 列表。
 
-        context_files: 命中的文件路径列表（用于参考文件展示 / mock 答案）
-        context_text: 拼好的上下文片段文本
-        成功返回文本；失败抛出 LLMError（绝不裸抛 SDK 异常）。
+        messages: [{"role": "user"|"assistant"|"system", "content": str}, ...]
+        context_files: 仅用于 mock 答案的「参考文件」展示
+        system_prompt: 自定义系统提示（覆盖默认；不传则用仓库助手默认提示）
+
+        成功返回助手文本；失败抛出 LLMError（绝不裸抛 SDK 异常）。
         """
-        if self.config.mock:
-            return self._mock_answer(question, context_files)
+        if not messages:
+            # 隐性健壮性：空消息列表既无意义也可能让部分 SDK 报错，提前拦截
+            raise LLMError("消息列表为空，无法调用 LLM")
 
-        system_prompt = (
+        if self.config.mock:
+            question = ""
+            for m in reversed(messages):
+                if m.get("role") == "user":
+                    question = m.get("content", "")
+                    break
+            return self._mock_answer(question, context_files or [])
+
+        sys_prompt = system_prompt or (
             "你是一个帮助理解代码仓库的助手。请基于下面提供的仓库上下文片段，"
             "用中文准确、简洁地回答用户的问题。如果上下文不足以回答，请如实说明。"
         )
-        user_prompt = (
-            f"用户问题：{question}\n\n"
-            f"=== 仓库上下文（来自 {len(context_files)} 个文件）===\n{context_text}\n"
-            "=== 上下文结束 ===\n请回答上面的问题。"
-        )
+        full = [{"role": "system", "content": sys_prompt}] + list(messages)
 
         client = self._get_client()
         try:
             resp = client.chat.completions.create(
                 model=self.config.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
+                messages=full,
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
             )
@@ -117,6 +126,31 @@ class LLMClient:
         except AttributeError:
             self.last_usage = None
         return message
+
+    def answer(
+        self,
+        question: str,
+        context_files: List[str],
+        context_text: str,
+        system_prompt: str | None = None,
+    ) -> str:
+        """基于检索到的上下文作答（单轮封装，内部走 complete 多轮入口）。
+
+        context_files: 命中的文件路径列表（用于参考文件展示 / mock 答案）
+        context_text: 拼好的上下文片段文本
+        system_prompt: 可覆盖默认系统提示
+        成功返回文本；失败抛出 LLMError（绝不裸抛 SDK 异常）。
+        """
+        user_prompt = (
+            f"用户问题：{question}\n\n"
+            f"=== 仓库上下文（来自 {len(context_files)} 个文件）===\n{context_text}\n"
+            "=== 上下文结束 ===\n请回答上面的问题。"
+        )
+        return self.complete(
+            [{"role": "user", "content": user_prompt}],
+            context_files=context_files,
+            system_prompt=system_prompt,
+        )
 
     @staticmethod
     def _mock_answer(question: str, context_files: List[str]) -> str:
