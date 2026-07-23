@@ -264,6 +264,9 @@ def index(
     max_size: Optional[int] = typer.Option(
         None, "--max-size", help="跳过超过此字节数的文件（避免大锁文件/数据文件污染索引）"
     ),
+    min_size: Optional[int] = typer.Option(
+        None, "--min-size", help="跳过小于此字节数的文件（过滤空/极小占位文件等噪声）"
+    ),
     incremental: bool = typer.Option(
         False, "--incremental", help="增量重建：未变更（mtime/size 不变）的文件直接复用旧索引，省去重复 I/O"
     ),
@@ -301,7 +304,7 @@ def index(
         exclude_list = [e.strip() for e in exclude.split(",") if e.strip()]
         if not as_json:
             typer.echo(f"🚫 忽略模式：{', '.join(exclude_list)}")
-    entries, skipped = build_index(path, exts=exts, max_size=max_size, prev=prev, exclude=exclude_list)
+    entries, skipped = build_index(path, exts=exts, max_size=max_size, min_size=min_size, prev=prev, exclude=exclude_list)
     out = save_index(entries, root)
     if as_json:
         # R1 新能力：机读索引摘要，便于 CI / 流水线消费（与 search/files/related 一致）

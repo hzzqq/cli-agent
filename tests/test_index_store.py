@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from index_store import build_index, INDEX_FILE  # noqa: E402
+from index_store import build_index, index_stats, INDEX_FILE  # noqa: E402
 from typer.testing import CliRunner  # noqa: E402
 import agent  # noqa: E402
 
@@ -259,3 +259,32 @@ def test_load_index_skips_malformed_entries(tmp_path):
     entries = load_index(str(p))
     assert len(entries) == 1
     assert entries[0].path == "a.py"
+
+
+def test_build_index_skips_too_small(tmp_path):
+    """R1 新需求：--min-size 应跳过小于字节下限的空/极小占位文件。"""
+    (tmp_path / "tiny.py").write_bytes(b"x")          # 1 字节
+    (tmp_path / "real.py").write_text("def f(): pass")  # 正常文件
+    entries, skipped = build_index(str(tmp_path), min_size=10)
+    paths = {e.path for e in entries}
+    assert str(tmp_path / "real.py") in paths
+    assert str(tmp_path / "tiny.py") not in paths
+    small = [s for s in skipped if s["reason"] == "too_small"]
+    assert small and small[0]["path"].endswith("tiny.py")
+
+
+def test_index_stats_tolerates_corrupt_entry(tmp_path):
+    """R2 修复验证：索引含单条损坏条目时，index_stats 不应崩溃，应容忍并统计其余。"""
+    idx = tmp_path / "corrupt_index.json"
+    payload = {
+        "indexed_at": "2024-01-01T00:00:00",
+        "files": [
+            {"path": "a.py", "snippet": "x=1"},          # 缺 size => 旧实现会 TypeError
+            {"path": "b.py", "snippet": "y=2", "size": 10},
+        ],
+    }
+    idx.write_text(__import__("json").dumps(payload), encoding="utf-8")
+    stats = index_stats(str(idx))
+    assert stats is not None
+    assert stats["file_count"] == 1   # 仅完好条目被统计，坏条目被跳过
+    assert stats["total_bytes"] == 10

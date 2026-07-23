@@ -80,6 +80,7 @@ def build_index(
     root: str,
     exts: "set[str] | None" = None,
     max_size: "int | None" = None,
+    min_size: "int | None" = None,
     prev: "List[IndexEntry] | None" = None,
     exclude: "list[str] | None" = None,
 ) -> "tuple[List[IndexEntry], List[dict]]":
@@ -87,13 +88,15 @@ def build_index(
 
     exts：可选扩展名白名单（小写，含点，如 {'.py', '.md'}）。提供时只索引这些类型。
     max_size：可选单文件字节上限；超过的文件被跳过（避免大锁文件/数据文件污染索引）。
+    min_size：可选单文件字节下限；小于该值的文件被跳过（R1 新能力，过滤空/极小的
+        占位文件——如 0 字节锁文件、临时碎片——避免无意义噪声进入检索上下文）。
     prev：上一轮索引条目；提供时进入「增量模式」——mtime 与 size 均未变的文件直接
         复用旧条目（不重读 snippet），显著减少大仓库的重复 I/O（隐性性能悬崖）。
     exclude：可选忽略模式列表（fnmatch，支持相对路径或文件名，如 ["tests/*", "*.min.js"]），
         匹配的文件跳过且不进入索引（R1 新能力，补充固定 SKIP_DIRS 之外的临时忽略需求）。
 
     返回的 skipped 为 [{path, reason, ...}]，reason ∈
-    {"unsupported_ext", "ext_filter", "too_large", "unreadable", "excluded"}，
+    {"unsupported_ext", "ext_filter", "too_large", "too_small", "unreadable", "excluded"}，
     便于 CLI 向用户公示「哪些文件没被索引」以提升可观测性。
     """
     # R2 修复（隐性可用性缺陷）：用户若写 `--ext py`（无点），exts 会是 {"py"}，
@@ -135,6 +138,10 @@ def build_index(
             continue
         if max_size is not None and size > max_size:
             skipped.append({"path": path, "reason": "too_large", "size": size})
+            continue
+        # R1 新能力：低于 min_size 的文件跳过（空/极小占位文件过滤）
+        if min_size is not None and size < min_size:
+            skipped.append({"path": path, "reason": "too_small", "size": size})
             continue
         # 增量模式：未变更的文件直接复用旧条目，跳过 I/O
         old = prev_by_path.get(path)
@@ -231,12 +238,17 @@ def index_stats(index_path: str = INDEX_FILE) -> "Dict | None":
     """
     if not os.path.exists(index_path):
         return None
+    # R2 修复（一致性/健壮性）：原实现用 `IndexEntry(**item)` 整体列表推导，
+    # 任一条目字段缺失/类型错误会抛 TypeError 而上层未捕获，导致 `stats` / `files`
+    # 命令在遇到「单条损坏条目」的索引时直接崩溃——而 load_index 早已改为逐条
+    # 容错、ask 检索能正常容忍同一份损坏索引。现复用防御性的 load_index 解析条目，
+    # 保证「部分损坏不拖垮整体统计」，与检索路径行为一致。
     try:
         with open(index_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
-    entries = [IndexEntry(**item) for item in data.get("files", [])]
+    entries = load_index(index_path)
     if not entries:
         return None
     total = sum(e.size for e in entries)
