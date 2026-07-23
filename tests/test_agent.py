@@ -813,3 +813,20 @@ def test_ask_passes_generation_params_to_client(monkeypatch):
     assert r.exit_code == 0
     assert captured.get("max_tokens") == 256
     assert captured.get("temperature") == 0.7
+
+
+def test_ask_passes_top_p_to_client(monkeypatch):
+    """R1 验证：ask 的 --top-p 透传给 LLMClient 配置。"""
+    captured = {}
+
+    def fake_complete(self, messages, context_files=None, system_prompt=None):
+        captured["top_p"] = self.config.top_p
+        return "答案"
+
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent.LLMClient, "complete", fake_complete)
+    r = runner.invoke(agent.app, ["ask", "问题", "--top-p", "0.85"])
+    assert r.exit_code == 0
+    assert captured.get("top_p") == 0.85

@@ -28,6 +28,7 @@ DEFAULT_MODEL = "qwen2.5:latest"
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_TOKENS = 1024
 DEFAULT_TEMPERATURE = 0.2
+DEFAULT_TOP_P = 1.0              # nucleus 采样阈值（1.0 = 关闭，等价于贪心）
 DEFAULT_RETRIES = 1           # 瞬态错误的重试次数（不含首次）
 DEFAULT_BACKOFF = 0.2         # 指数退避基延迟（秒）
 DEFAULT_MAX_CONTEXT_TOKENS = 12000  # 发送给模型的历史 token 预算上限（防上下文溢出）
@@ -53,6 +54,7 @@ class LLMConfig:
     timeout: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT", str(DEFAULT_TIMEOUT))))
     max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))))
     temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", str(DEFAULT_TEMPERATURE))))
+    top_p: float = field(default_factory=lambda: float(os.getenv("LLM_TOP_P", str(DEFAULT_TOP_P))))
     retries: int = field(default_factory=lambda: int(os.getenv("LLM_RETRIES", str(DEFAULT_RETRIES))))
     backoff: float = field(default_factory=lambda: float(os.getenv("LLM_BACKOFF", str(DEFAULT_BACKOFF))))
     max_context_tokens: int = field(
@@ -202,6 +204,7 @@ class LLMClient:
                     messages=full,
                     temperature=self.config.temperature,
                     max_tokens=self.config.max_tokens,
+                    top_p=self.config.top_p,
                 )
             except Exception as exc:  # 隐性问题：网络/限流/鉴权错误需被捕获并包装
                 last_exc = exc
@@ -275,6 +278,7 @@ class LLMClient:
                 messages=full,
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
+                top_p=self.config.top_p,
                 stream=True,
             )
             for chunk in stream:

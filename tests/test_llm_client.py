@@ -240,3 +240,51 @@ def test_complete_trims_oversized_history(monkeypatch):
     # system 提示 + 仅剩的最后一条 user 消息（其余被裁掉）
     assert msgs[0]["role"] == "system"
     assert len(msgs) == 2
+
+
+def test_complete_passes_top_p(monkeypatch):
+    """R1/R2 验证：top_p 生成参数须真正透传到 SDK 调用（此前被静默忽略）。"""
+    captured = {}
+
+    class _C:
+        def create(self, **kw):
+            captured.update(kw)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+
+    class _Chat:
+        completions = _C()
+
+    class _Client:
+        chat = _Chat()
+
+    monkeypatch.setattr(LLMClient, "_get_client", lambda self: _Client())
+    c = LLMClient(LLMConfig(mock=False, top_p=0.9))
+    c.complete([{"role": "user", "content": "q"}])
+    assert captured.get("top_p") == 0.9
+
+
+def test_default_top_p_applied(monkeypatch):
+    """默认 top_p 仍应随调用下发（保持与 temperature 一致的行为）。"""
+    captured = {}
+
+    class _C:
+        def create(self, **kw):
+            captured.update(kw)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+
+    class _Chat:
+        completions = _C()
+
+    class _Client:
+        chat = _Chat()
+
+    monkeypatch.setattr(LLMClient, "_get_client", lambda self: _Client())
+    c = LLMClient(LLMConfig(mock=False))
+    c.complete([{"role": "user", "content": "q"}])
+    assert captured.get("top_p") == 1.0

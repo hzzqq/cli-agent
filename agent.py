@@ -110,6 +110,7 @@ def _build_config(
     api_key: Optional[str],
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
     timeout: Optional[float] = None,
     root: str = ".",
 ) -> Optional[LLMConfig]:
@@ -118,7 +119,7 @@ def _build_config(
 
     R1 新能力：配置文件让常用接入项「一次写入、处处复用」，无需每次敲长 flag。
     优先级：CLI flag > 配置文件 > 环境变量默认。
-    CLI 生成参数（max_tokens/temperature/timeout）同样以 CLI 优先级最高，
+    CLI 生成参数（max_tokens/temperature/top_p/timeout）同样以 CLI 优先级最高，
     即便未设置 model/base_url/api_key 也单独生效（此前这些参数无法覆盖）。
     """
     file_cfg = _load_file_config(root)
@@ -137,6 +138,7 @@ def _build_config(
     gen = {
         "max_tokens": max_tokens,
         "temperature": temperature,
+        "top_p": top_p,
         "timeout": timeout,
     }
     if any(v is not None for v in gen.values()):
@@ -332,6 +334,7 @@ def ask(
     max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="最大生成 token 数（成本/长度控制，覆盖默认值）"),
     temperature: Optional[float] = typer.Option(None, "--temperature", help="采样温度（控制创造性，覆盖默认值）"),
     timeout: Optional[float] = typer.Option(None, "--timeout", help="请求超时秒数（覆盖默认值）"),
+    top_p: Optional[float] = typer.Option(None, "--top-p", help="nucleus 采样阈值（覆盖默认值，1.0 即关闭）"),
     as_json: bool = typer.Option(False, "--json", help="以 JSON 格式输出"),
     system_prompt: Optional[str] = typer.Option(None, "--system-prompt", help="自定义系统提示（内联），覆盖默认助手提示"),
     system_prompt_file: Optional[str] = typer.Option(None, "--system-prompt-file", help="从文件读取系统提示（优先于 --system-prompt）"),
@@ -359,7 +362,7 @@ def ask(
     # 隐性问题：索引要求是「检索」的前置条件；--no-context 下无需索引也应允许提问
     if not no_context and not _require_index():
         raise typer.Exit(code=1)
-    cfg = _build_config(model, base_url, api_key, max_tokens=max_tokens, temperature=temperature, timeout=timeout)
+    cfg = _build_config(model, base_url, api_key, max_tokens=max_tokens, temperature=temperature, top_p=top_p, timeout=timeout)
     sp = _resolve_system_prompt(system_prompt, system_prompt_file)
     _do_ask(
         question, top_k, config=cfg, as_json=as_json, min_score=min_score,
@@ -765,6 +768,7 @@ def chat(
     max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="最大生成 token 数（成本/长度控制，覆盖默认值）"),
     temperature: Optional[float] = typer.Option(None, "--temperature", help="采样温度（控制创造性，覆盖默认值）"),
     timeout: Optional[float] = typer.Option(None, "--timeout", help="请求超时秒数（覆盖默认值）"),
+    top_p: Optional[float] = typer.Option(None, "--top-p", help="nucleus 采样阈值（覆盖默认值，1.0 即关闭）"),
     system_prompt: Optional[str] = typer.Option(None, "--system-prompt", help="自定义系统提示（内联），覆盖默认助手提示"),
     system_prompt_file: Optional[str] = typer.Option(None, "--system-prompt-file", help="从文件读取系统提示（优先于 --system-prompt）"),
     no_context: bool = typer.Option(False, "--no-context", help="跳过仓库检索，每轮直接把问题交给 LLM（纯通用对话）"),
@@ -778,7 +782,7 @@ def chat(
     """进入交互式多轮对话，每轮都带上检索到的上下文。输入 exit/quit 退出。"""
     if not no_context and not _require_index():
         raise typer.Exit(code=1)
-    cfg = _build_config(model, base_url, api_key, max_tokens=max_tokens, temperature=temperature, timeout=timeout)
+    cfg = _build_config(model, base_url, api_key, max_tokens=max_tokens, temperature=temperature, top_p=top_p, timeout=timeout)
     sp = _resolve_system_prompt(system_prompt, system_prompt_file)
     typer.echo("💬 进入对话模式（输入 exit 或 quit 退出）：")
     # R1 新能力：从持久化文件恢复多轮历史，使对话可跨 CLI 重启续聊
