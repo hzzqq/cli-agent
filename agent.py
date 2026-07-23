@@ -104,6 +104,35 @@ def _save_file_config(cfg: LLMConfig, root: str = ".") -> None:
         _json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def _unset_file_config(keys: "list[str]", root: str = ".") -> "list[str]":
+    """从持久化配置文件中删除指定白名单键（其余键保持不变），返回实际被删除的键。
+
+    R1 新能力：与 --save 互补——此前只能写入配置文件、无法撤销某项错误持久化的
+    接入项（如误存的 api_key）。现支持按需删除单个/多个键。
+    仅白名单键可被删除，非白名单键被忽略（防御配置文件被滥用）；
+    文件不存在 / 损坏时安全返回空列表（与 _load_file_config 一致）。
+    """
+    path = os.path.join(root, CONFIG_FILE)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+    except (OSError, _json.JSONDecodeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    removed = []
+    for k in keys:
+        if k in _CONFIG_KEYS and k in data:
+            del data[k]
+            removed.append(k)
+    if removed:
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(data, f, ensure_ascii=False, indent=2)
+    return removed
+
+
 def _build_config(
     model: Optional[str],
     base_url: Optional[str],
@@ -155,7 +184,7 @@ def _resolve_system_prompt(
     """解析系统提示来源：文件优先，其次内联文本，均无则返回 None（沿用默认）。"""
     if file_path:
         try:
-            return Path(file_path).read_text(encoding="utf-8").strip()
+            return Path(file_path).read_text(encoding="utf-8", errors="ignore").strip()
         except OSError as exc:
             typer.echo(f"⚠️ 无法读取系统提示文件：{exc}", err=True)
             raise typer.Exit(code=1)
@@ -353,7 +382,7 @@ def ask(
     # 问题来源优先级：--file > 位置参数 > 管道（stdin）
     if question_file:
         try:
-            question = Path(question_file).read_text(encoding="utf-8").strip()
+            question = Path(question_file).read_text(encoding="utf-8", errors="ignore").strip()
         except OSError as exc:
             typer.echo(f"⚠️ 无法读取问题文件：{exc}", err=True)
             raise typer.Exit(code=1)
@@ -623,6 +652,7 @@ def config(
     base_url: Optional[str] = typer.Option(None, "--base-url", help="覆盖 API 地址（仅用于预览生效值/持久化）"),
     api_key: Optional[str] = typer.Option(None, "--api-key", help="覆盖 API Key（仅用于预览生效值/持久化）"),
     save: bool = typer.Option(False, "--save", help="把当前生效配置写入 .cliagent_config.json，供后续运行复用"),
+    unset: Optional[str] = typer.Option(None, "--unset", help="从配置文件删除指定键（逗号分隔，仅白名单内），如 --unset api_key,model"),
     check: bool = typer.Option(False, "--check", help="探测 LLM 端点可用性（调用 health 探针，离线 mock 模式直接返回可用）"),
     as_json: bool = typer.Option(False, "--json", help="以 JSON 输出配置 / 健康状态，便于脚本消费"),
 ):
@@ -630,8 +660,24 @@ def config(
 
     R1 新能力：加 --save 可把当前生效配置持久化到 .cliagent_config.json，
     后续 ask/chat/index 将自动读取，无需每次重复敲 --model/--base-url/--api-key。
+    加 --unset KEY[,KEY...] 可撤销已持久化的某个/多个接入项（与 --save 互补，
+    便于清理误存的 api_key 等）。
     加 --check 可探测 LLM 端点是否可用（health 探针）；--json 输出结构化结果。
     """
+    if unset:
+        # R1 新能力：撤销持久化配置项（独立于展示/保存流程，优先处理）
+        keys = [k.strip() for k in unset.split(",") if k.strip()]
+        invalid = [k for k in keys if k not in _CONFIG_KEYS]
+        removed = _unset_file_config(keys, ".")
+        if invalid:
+            typer.echo(
+                f"⚠️ 忽略非白名单键（不可删除）：{', '.join(invalid)}", err=True
+            )
+        if removed:
+            typer.echo(f"🗑️  已从 {CONFIG_FILE} 删除配置项：{', '.join(removed)}")
+        else:
+            typer.echo(f"ℹ️  {CONFIG_FILE} 中无匹配键可删除（或文件不存在）")
+        return
     cfg = _build_config(model, base_url, api_key) or LLMConfig()
     if check:
         # R1 新能力：端点健康探针，快速判断当前配置能否真正调用 LLM

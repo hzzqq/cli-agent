@@ -830,3 +830,65 @@ def test_ask_passes_top_p_to_client(monkeypatch):
     r = runner.invoke(agent.app, ["ask", "问题", "--top-p", "0.85"])
     assert r.exit_code == 0
     assert captured.get("top_p") == 0.85
+
+
+def test_config_unset_removes_key(monkeypatch, tmp_path):
+    """R1 验证：config --unset 从配置文件删除指定键，其余键保留，非白名单键忽略。"""
+    monkeypatch.chdir(tmp_path)
+    r = runner.invoke(agent.app, ["config", "--model", "gpt-x", "--api-key", "SECRET", "--save"])
+    assert r.exit_code == 0
+    cfg_path = tmp_path / agent.CONFIG_FILE
+    assert cfg_path.exists()
+    saved = agent._json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert saved.get("model") == "gpt-x" and saved.get("api_key") == "SECRET"
+
+    # 撤销 api_key，保留 model；非白名单键被忽略
+    r2 = runner.invoke(agent.app, ["config", "--unset", "api_key,not_a_key"])
+    assert r2.exit_code == 0
+    after = agent._json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert "api_key" not in after
+    assert after.get("model") == "gpt-x"
+
+    # 再撤销 model
+    runner.invoke(agent.app, ["config", "--unset", "model"])
+    final = agent._json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert "model" not in final
+
+
+def test_system_prompt_file_non_utf8_no_crash(monkeypatch, tmp_path):
+    """R2 修复验证：系统提示文件为非 UTF-8 编码时不再抛 UnicodeDecodeError 崩溃。"""
+    sp_file = tmp_path / "sp.txt"
+    sp_file.write_bytes(b"caf\xe9 sp\xe9cial prompt")  # 含无效 UTF-8 字节
+    captured = {}
+
+    def fake_complete(self, messages, context_files=None, system_prompt=None):
+        captured["system_prompt"] = system_prompt
+        return "答案"
+
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent.LLMClient, "complete", fake_complete)
+    r = runner.invoke(agent.app, ["ask", "问题", "--system-prompt-file", str(sp_file)])
+    assert r.exit_code == 0
+    # errors="ignore" 成功读取（非崩溃），内容为 str
+    assert isinstance(captured.get("system_prompt"), str)
+
+
+def test_ask_file_non_utf8_no_crash(monkeypatch, tmp_path):
+    """R2 修复验证：--file 问题文件为非 UTF-8 时不再崩溃。"""
+    q_file = tmp_path / "q.txt"
+    q_file.write_bytes(b"r\xe9sum\xe9 content")  # 含无效 UTF-8 字节
+    captured = {}
+
+    def fake_complete(self, messages, context_files=None, system_prompt=None):
+        captured["question"] = messages[-1]["content"]
+        return "答案"
+
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent.LLMClient, "complete", fake_complete)
+    r = runner.invoke(agent.app, ["ask", "占位", "--file", str(q_file)])
+    assert r.exit_code == 0
+    assert isinstance(captured.get("question"), str)
