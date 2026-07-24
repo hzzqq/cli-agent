@@ -61,8 +61,13 @@ def _idf(term: str, docs_tokens: List[List[str]]) -> float:
     return math.log((len(docs_tokens) + 1) / (df + 1)) + 1.0
 
 
-def retrieve_scored(question: str, top_k: int = 5, min_score: float = 0.0):
+def retrieve_scored(question: str, top_k: int = 5, min_score: float = 0.0,
+                    index_path: "str | None" = None):
     """根据问题召回 top-K 相关文件，并返回每项的相关度分数。
+
+    index_path：可选索引文件路径（R1/R2 支撑 --root）。默认 None 时
+    回落到 cwd 下的 INDEX_FILE，与历史行为一致；传入则加载指定目录
+    索引，使「在 A 目录建索引、在 B 目录查询」也能正确命中。
 
     返回 [(entry, score), ...] 按分数降序。min_score 用于过滤弱相关命中
     （隐性问题：无阈值会把噪声文件一并送入 LLM 上下文，拉低回答质量）。
@@ -70,7 +75,7 @@ def retrieve_scored(question: str, top_k: int = 5, min_score: float = 0.0):
     修复此前用 set(q_tokens) 丢弃查询词频、导致「python python」与
     「python」权重相同的隐性打分缺陷。
     """
-    entries = load_index()
+    entries = load_index(index_path) if index_path else load_index()
     if not entries:
         return []
 
@@ -114,7 +119,8 @@ def retrieve(question: str, top_k: int = 5, min_score: float = 0.0) -> List[Inde
 
 
 def find_related(
-    content: str, target_path: str, top_k: int = 5, min_score: float = 0.0
+    content: str, target_path: str, top_k: int = 5, min_score: float = 0.0,
+    index_path: "str | None" = None,
 ) -> "List[tuple]":
     """找出与给定文件内容最相似的索引文件（排除自身），返回 [(entry, score)]。
 
@@ -126,7 +132,8 @@ def find_related(
     这里对 `target_path` 做归一化（abspath / 相对 cwd 的 relpath / basename 三种形态）
     后再与每个 entry.path 比较，确保任意路径写法下都能可靠排除自身。
     """
-    hits = retrieve_scored(content, top_k=top_k + 1, min_score=min_score)
+    hits = retrieve_scored(content, top_k=top_k + 1, min_score=min_score,
+                          index_path=index_path)
     targets = {target_path, os.path.abspath(target_path), os.path.basename(target_path)}
     try:
         targets.add(os.path.relpath(os.path.abspath(target_path)))
@@ -136,7 +143,8 @@ def find_related(
     return rel[:top_k]
 
 
-def explain_retrieval(question: str, top_k: int = 5, min_score: float = 0.0) -> List[dict]:
+def explain_retrieval(question: str, top_k: int = 5, min_score: float = 0.0,
+                      index_path: "str | None" = None) -> List[dict]:
     """返回每篇命中文件的匹配关键词与分数，便于排查检索质量（透明性 / 可观测）。
 
     返回 [{"path": str, "score": float, "terms": List[str]}, ...]，
@@ -144,7 +152,8 @@ def explain_retrieval(question: str, top_k: int = 5, min_score: float = 0.0) -> 
     """
     from collections import Counter
 
-    hits = retrieve_scored(question, top_k=top_k, min_score=min_score)
+    hits = retrieve_scored(question, top_k=top_k, min_score=min_score,
+                          index_path=index_path)
     # R2 修复（一致性）：原实现用 set(q_tokens)，丢失查询词频，
     # 导致展示的命中词顺序与 retrieve_scored 的打分权重（Counter 加权）脱节。
     # 现用 Counter，命中的词按「在查询中出现的频次」降序排列，
@@ -175,6 +184,7 @@ def build_context(
     min_score: float = 0.0,
     max_context_chars: int = MAX_CONTEXT_CHARS,
     max_block_chars: int = MAX_BLOCK_CHARS,
+    index_path: "str | None" = None,
 ) -> tuple[str, List[str]]:
     """返回 (拼接好的上下文文本, 实际进入上下文的文件路径列表)。
 
@@ -190,7 +200,8 @@ def build_context(
     「参考文件」列表与 --json 的 references、--verbose 命中数都虚高。
     现改为只返回实际被加入上下文的文件路径（included_paths）。
     """
-    hits = retrieve_scored(question, top_k=top_k, min_score=min_score)
+    hits = retrieve_scored(question, top_k=top_k, min_score=min_score,
+                          index_path=index_path)
     if not hits:
         return "", []
     parts = []

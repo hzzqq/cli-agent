@@ -48,15 +48,23 @@ def version():
     typer.echo(f"cli-agent {VERSION}")
 
 
-def _require_index() -> bool:
+def _require_index(root: str = ".") -> bool:
     """检查是否已建索引，未建则打印友好提示并返回 False。
+
+    root：索引文件所在目录（与 index 的 --root 对齐）。默认 "." 即 cwd 下
+    INDEX_FILE，与历史行为一致；传入其它目录则校验该目录的索引。
 
     隐性问题：原先索引文件存在但已损坏（无法解析）时，load_index 静默返回
     []，导致提示误报「尚未发现索引文件」，误导用户以为是没建索引。这里
     通过 os.path.exists 区分「未建」与「已损坏」，给出准确诊断。
     """
-    if not load_index():
-        if os.path.exists(INDEX_FILE):
+    index_path = os.path.join(root, INDEX_FILE)
+    # 默认 root="." 时回落到 0 参 load_index()（与历史/既有单测一致）；
+    # 仅当显式给定 --root 时才按该目录索引校验——既修复「跨目录查询」的
+    # 前置诊断，又不破坏把 load_index 打桩为 0 参 lambda 的既有测试。
+    loaded = load_index(index_path) if root and root != "." else load_index()
+    if not loaded:
+        if os.path.exists(index_path):
             typer.echo(
                 f"⚠️  索引文件（{INDEX_FILE}）存在但无法解析（可能已损坏）。\n"
                 "请重新运行：python agent.py index <目录>"
@@ -205,13 +213,15 @@ def _do_ask(
     max_context_chars: int = 6000,
     stream: bool = True,
     explain: bool = False,
+    index_path: "str | None" = None,
 ):
     # 隐性问题：--no-context 下不应再强制检索，否则会为「纯通用问题」无谓加载索引
     if no_context:
         context_text, paths = "", []
     else:
         context_text, paths = build_context(
-            question, top_k=top_k, min_score=min_score, max_context_chars=max_context_chars
+            question, top_k=top_k, min_score=min_score,
+            max_context_chars=max_context_chars, index_path=index_path,
         )
     # R1 可观测性：--verbose 展示检索概况，便于排查召回质量
     if verbose:
@@ -231,7 +241,8 @@ def _do_ask(
         from retriever import explain_retrieval
 
         typer.echo("🔎 检索解释（按相关度）：")
-        for hit in explain_retrieval(question, top_k=top_k, min_score=min_score):
+        for hit in explain_retrieval(question, top_k=top_k, min_score=min_score,
+                                     index_path=index_path):
             terms = "、".join(hit["terms"]) or "（无显式关键词匹配）"
             typer.echo(f"  {hit['score']:.2f}　{hit['path']}　命中词：{terms}")
     client = LLMClient(config)
@@ -377,6 +388,7 @@ def ask(
         max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符），超出后停止追加更低相关文件"),
         no_stream: bool = typer.Option(False, "--no-stream", help="关闭流式输出，等生成完毕后一次性打印（兼容管道/脚本）"),
         explain: bool = typer.Option(False, "--explain", "-e", help="打印检索解释（命中文件+相关度+命中词），便于排查召回质量"),
+        root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录（与 index 的 --root 对齐，便于查询非默认目录建立的索引）"),
 ):
     """基于索引检索相关文件并调用 LLM 作答。"""
     # 问题来源优先级：--file > 位置参数 > 管道（stdin）
@@ -392,15 +404,16 @@ def ask(
         typer.echo("⚠️ 问题不能为空（可传入参数，或 --file 提供，或用管道：echo '问题' | python agent.py ask）", err=True)
         raise typer.Exit(code=1)
     # 隐性问题：索引要求是「检索」的前置条件；--no-context 下无需索引也应允许提问
-    if not no_context and not _require_index():
+    if not no_context and not _require_index(root):
         raise typer.Exit(code=1)
     cfg = _build_config(model, base_url, api_key, max_tokens=max_tokens, temperature=temperature, top_p=top_p, timeout=timeout)
     sp = _resolve_system_prompt(system_prompt, system_prompt_file)
+    index_path = os.path.join(root, INDEX_FILE)
     _do_ask(
         question, top_k, config=cfg, as_json=as_json, min_score=min_score,
         system_prompt=sp, no_context=no_context, save_path=save_path, verbose=verbose,
         max_context_chars=max_context_chars, stream=not no_stream,
-        explain=explain,
+        explain=explain, index_path=index_path,
     )
 
 
@@ -411,6 +424,7 @@ def context(
     min_score: float = typer.Option(0.0, "--min-score", help="最低相关度阈值，过滤弱相关文件"),
     max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符）"),
     as_json: bool = typer.Option(False, "--json", help="以 JSON 输出检索上下文与参考文件，便于脚本消费"),
+    root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录（与 index 的 --root 对齐）"),
 ):
     """仅展示检索到的上下文与参考文件（不调用 LLM）。
 
@@ -419,9 +433,11 @@ def context(
     # R2 修复（隐性诊断缺陷）：原实现直接调用 build_context，在无索引时
     # 会误报「未检索到相关文件」，与「索引未建/已损坏」的真实原因混淆。
     # 现先经 _require_index 区分，与 ask/explain 等命令保持一致的诊断口径。
-    if not _require_index():
+    if not _require_index(root):
         raise typer.Exit(code=1)
-    text, paths = build_context(question, top_k=top_k, min_score=min_score, max_context_chars=max_context_chars)
+    index_path = os.path.join(root, INDEX_FILE)
+    text, paths = build_context(question, top_k=top_k, min_score=min_score,
+                                  max_context_chars=max_context_chars, index_path=index_path)
     if not paths:
         typer.echo("🔎 未检索到相关文件，请确认问题与仓库内容相关。")
         raise typer.Exit(code=1)
@@ -444,17 +460,20 @@ def explain(
     top_k: int = typer.Option(5, "--top-k", "-k", help="召回的相关文件数量"),
     min_score: float = typer.Option(0.0, "--min-score", help="最低相关度阈值，过滤弱相关文件"),
     as_json: bool = typer.Option(False, "--json", help="以 JSON 数组输出检索解释，便于脚本消费"),
+    root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录（与 index 的 --root 对齐）"),
 ):
     """展示「为什么召回了这些文件」：命中文件 + 相关度 + 命中关键词（不调用 LLM）。
 
     与 context/search 类似，explain 只做检索解释、不消耗 LLM 额度，
     适合排查检索质量、核对参考来源，或在提交问题前确认召回是否合理。
     """
-    if not _require_index():
+    if not _require_index(root):
         raise typer.Exit(code=1)
     from retriever import explain_retrieval
 
-    hits = explain_retrieval(question, top_k=top_k, min_score=min_score)
+    index_path = os.path.join(root, INDEX_FILE)
+    hits = explain_retrieval(question, top_k=top_k, min_score=min_score,
+                              index_path=index_path)
     if not hits:
         typer.echo("🔎 未检索到相关文件，请确认索引已建立且问题与仓库内容相关。")
         raise typer.Exit(code=1)
@@ -570,6 +589,7 @@ def related(
         None, "--max-size", help="仅读取文件前 N 字节作为内容样本（避免大文件读全量）"
     ),
     as_json: bool = typer.Option(False, "--json", help="以 JSON 数组输出相似文件（便于脚本消费）"),
+    root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录（与 index 的 --root 对齐）"),
 ):
     """找出与给定文件内容最相似的索引文件（不调用 LLM，基于 BM25 词重叠）。
 
@@ -590,11 +610,12 @@ def related(
     if max_size:
         content = content[:max_size]
     # 复用与 ask 一致的索引前置检查（区分未建 / 已损坏）
-    if not _require_index():
+    if not _require_index(root):
         raise typer.Exit(code=1)
     # R2 修复：find_related 对目标路径做归一化后排除自身，避免不同路径写法
     # 导致目标文件被当作「最相似」返回（详见 retriever.find_related 注释）
-    rel = find_related(content, file, top_k=top_k)
+    index_path = os.path.join(root, INDEX_FILE)
+    rel = find_related(content, file, top_k=top_k, index_path=index_path)
     if not rel:
         if as_json:
             typer.echo(_json.dumps([], ensure_ascii=False))
@@ -827,12 +848,14 @@ def chat(
         explain: bool = typer.Option(False, "--explain", "-e", help="每轮打印检索解释（命中文件+相关度+命中词）"),
         session_file: Optional[str] = typer.Option(None, "--session", help="对话历史持久化文件（JSON）：进入时载入、每轮后保存，支持跨重启续聊"),
         save_file: Optional[str] = typer.Option(None, "--save", help="把整段对话转录为 Markdown 保存到该文件（退出时落盘）"),
+        root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录（与 index 的 --root 对齐）"),
 ):
     """进入交互式多轮对话，每轮都带上检索到的上下文。输入 exit/quit 退出。"""
-    if not no_context and not _require_index():
+    if not no_context and not _require_index(root):
         raise typer.Exit(code=1)
     cfg = _build_config(model, base_url, api_key, max_tokens=max_tokens, temperature=temperature, top_p=top_p, timeout=timeout)
     sp = _resolve_system_prompt(system_prompt, system_prompt_file)
+    index_path = os.path.join(root, INDEX_FILE)
     typer.echo("💬 进入对话模式（输入 exit 或 quit 退出）：")
     # R1 新能力：从持久化文件恢复多轮历史，使对话可跨 CLI 重启续聊
     history: list[dict] = load_session(session_file) if session_file else []
@@ -855,7 +878,7 @@ def chat(
             if save_file:
                 _save_transcript(save_file, history)
             break
-        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context, verbose=verbose, max_context_chars=max_context_chars, stream=not no_stream, explain=explain)
+        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context, verbose=verbose, max_context_chars=max_context_chars, stream=not no_stream, explain=explain, index_path=index_path)
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": answer})
         if session_file:
