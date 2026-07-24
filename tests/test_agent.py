@@ -946,3 +946,20 @@ def test_models_command_failure(monkeypatch):
     r = runner.invoke(agent.app, ["models"])
     assert r.exit_code == 1
     assert "获取模型列表失败" in r.output
+
+
+def test_completion_bash_lists_commands():
+    """R1 验证：completion 输出 bash 补全脚本，含子命令与 complete 指令。"""
+    r = runner.invoke(agent.app, ["completion"])
+    assert r.exit_code == 0
+    assert "complete -F" in r.output
+    for cmd in ("ask", "chat", "index", "search", "related"):
+        assert cmd in r.output
+
+
+def test_completion_zsh_flag():
+    """R1 验证：-s zsh 输出 zsh 风格补全脚本（#compdef）。"""
+    r = runner.invoke(agent.app, ["completion", "-s", "zsh"])
+    assert r.exit_code == 0
+    assert "#compdef cli-agent" in r.output
+    assert "ask" in r.output

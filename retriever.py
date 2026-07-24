@@ -63,6 +63,10 @@ def _idf(term: str, docs_tokens: List[List[str]]) -> float:
 
 def retrieve_scored(question: str, top_k: int = 5, min_score: float = 0.0,
                     index_path: "str | None" = None):
+    # R2 修复（隐性相关性缺陷）：top_k 为负数时 Python 的 scored[:top_k] 会变成
+    # 「取末尾 N 个」即最低分文件，导致 ask/chat 拿到最不相关的内容。现统一钳制
+    # 为 >=0（负数→0，返回空结果），由调用方（CLI）负责校验 >=1 的友好报错。
+    top_k = max(0, int(top_k))
     """根据问题召回 top-K 相关文件，并返回每项的相关度分数。
 
     index_path：可选索引文件路径（R1/R2 支撑 --root）。默认 None 时

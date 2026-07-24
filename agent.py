@@ -48,6 +48,56 @@ def version():
     typer.echo(f"cli-agent {VERSION}")
 
 
+def _cli_agent_commands():
+    """返回当前注册的所有子命令名（用于补全脚本，避免硬编码随命令增减而漂移）。"""
+    try:
+        names = [c.name for c in app.registered_commands if c.name]
+        if names:
+            return names
+    except Exception:
+        pass
+    return ["ask", "chat", "index", "search", "files", "related",
+            "context", "explain", "prune", "stats", "config", "models",
+            "clear", "version"]
+
+
+def _bash_completion(commands):
+    cmds = " ".join(commands)
+    return (
+        "# cli-agent bash 自动补全\n"
+        f"_cli_agent_cmds='{cmds}'\n"
+        "_cli_agent_complete() {\n"
+        '  COMPREPLY=( $(compgen -W "$_cli_agent_cmds" -- "${COMP_WORDS[1]}") )\n'
+        "}\n"
+        "complete -F _cli_agent_complete cli-agent\n"
+    )
+
+
+def _zsh_completion(commands):
+    cmds = " ".join(commands)
+    return (
+        "#compdef cli-agent\n"
+        "_cli_agent() {\n"
+        f'  _values "command" {cmds}\n'
+        "}\n"
+        "_cli_agent\n"
+    )
+
+
+@app.command()
+def completion(
+    shell: str = typer.Option("bash", "--shell", "-s", help="补全脚本目标 shell：bash 或 zsh"),
+):
+    """输出 shell 自动补全脚本（R1 新能力）。
+
+    用法示例：source <(cli-agent completion)   # bash 启用 Tab 子命令补全，
+    长命令行的可用性提升。脚本基于当前实际注册命令动态生成，命令增减自动同步。
+    """
+    names = _cli_agent_commands()
+    script = _zsh_completion(names) if shell == "zsh" else _bash_completion(names)
+    typer.echo(script)
+
+
 def _require_index(root: str = ".") -> bool:
     """检查是否已建索引，未建则打印友好提示并返回 False。
 

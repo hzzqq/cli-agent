@@ -70,6 +70,13 @@ def test_build_context_no_hit(tmp_path, monkeypatch):
     assert paths == []
 
 
+def test_retrieve_scored_negative_topk_returns_empty(cn_index):
+    """R2 修复验证：top_k 为负时 Python 切片会变成「取末尾项」即最不相关文件，
+    现应钳制为返回空，而非把噪声内容送进 LLM 上下文。"""
+    hits = retrieve_scored("如何准备标注数据", top_k=-3)
+    assert hits == []
+
+
 @pytest.fixture
 def cn_index(tmp_path, monkeypatch):
     entries = [
