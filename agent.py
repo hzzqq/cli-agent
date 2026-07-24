@@ -236,6 +236,24 @@ def _build_config(
     return cfg
 
 
+def _validate_retrieval_opts(
+    top_k: int, min_score: float = 0.0, max_context_chars: int = 6000
+) -> None:
+    """校验检索类命令的数值参数，越界即在 CLI 边界友好报错并退出（R1 输入护栏）。
+
+    R3 类型安全/空值防护维度：此前 --top-k 0/负数、--min-score 负、--max-context-chars
+    负会被静默吞掉——负数 top_k 经 retrieve_scored 钳制为 0 返回空召回，用户误以为
+    「未检索到相关文件」；负阈值/负预算则完全无校验。现统一在命令入口拦截并给出明确诊断，
+    避免「输入明显非法却表现正常」的隐性误导（R2 隐性可用性缺陷）。
+    """
+    if top_k is not None and top_k < 1:
+        raise typer.BadParameter(f"--top-k 必须 >= 1（当前 {top_k}）")
+    if min_score is not None and min_score < 0:
+        raise typer.BadParameter(f"--min-score 必须 >= 0（当前 {min_score}）")
+    if max_context_chars is not None and max_context_chars < 0:
+        raise typer.BadParameter(f"--max-context-chars 必须 >= 0（当前 {max_context_chars}）")
+
+
 def _resolve_system_prompt(
     inline: Optional[str], file_path: Optional[str]
 ) -> "Optional[str]":
@@ -441,6 +459,9 @@ def ask(
         root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录（与 index 的 --root 对齐，便于查询非默认目录建立的索引）"),
 ):
     """基于索引检索相关文件并调用 LLM 作答。"""
+    # R1 输入护栏：在入口校验检索数值参数，非法值（如 --top-k 0/负、--min-score 负）
+    # 立即友好报错，避免被静默钳制成空召回误导用户。
+    _validate_retrieval_opts(top_k, min_score, max_context_chars)
     # 问题来源优先级：--file > 位置参数 > 管道（stdin）
     if question_file:
         try:
@@ -480,6 +501,7 @@ def context(
 
     便于排查检索质量、核对参考来源，或在不想消耗 LLM 额度时预览。
     """
+    _validate_retrieval_opts(top_k, min_score, max_context_chars)
     # R2 修复（隐性诊断缺陷）：原实现直接调用 build_context，在无索引时
     # 会误报「未检索到相关文件」，与「索引未建/已损坏」的真实原因混淆。
     # 现先经 _require_index 区分，与 ask/explain 等命令保持一致的诊断口径。
@@ -517,6 +539,7 @@ def explain(
     与 context/search 类似，explain 只做检索解释、不消耗 LLM 额度，
     适合排查检索质量、核对参考来源，或在提交问题前确认召回是否合理。
     """
+    _validate_retrieval_opts(top_k, min_score, 6000)
     if not _require_index(root):
         raise typer.Exit(code=1)
     from retriever import explain_retrieval
@@ -646,6 +669,7 @@ def related(
     R1 新能力：快速定位「哪些文件与当前文件高度相关」，适用于重构时评估
     影响面、寻找可复用模块、或理解某文件在仓库中的关联结构。
     """
+    _validate_retrieval_opts(top_k, 0.0, 6000)
     from retriever import find_related
 
     p = Path(file)
@@ -929,6 +953,8 @@ def chat(
         root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录（与 index 的 --root 对齐）"),
 ):
     """进入交互式多轮对话，每轮都带上检索到的上下文。输入 exit/quit 退出。"""
+    # chat 暂不暴露 --min-score（检索质量由 top_k 控制），以默认值 0.0 校验越界
+    _validate_retrieval_opts(top_k, 0.0, max_context_chars)
     if not no_context and not _require_index(root):
         raise typer.Exit(code=1)
     cfg = _build_config(model, base_url, api_key, max_tokens=max_tokens, temperature=temperature, top_p=top_p, timeout=timeout)

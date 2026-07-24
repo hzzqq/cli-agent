@@ -963,3 +963,45 @@ def test_completion_zsh_flag():
     assert r.exit_code == 0
     assert "#compdef cli-agent" in r.output
     assert "ask" in r.output
+
+
+def test_ask_topk_zero_rejected(monkeypatch):
+    """R1 输入护栏：--top-k 0 立即报错（非法），不再被静默钳制成空召回误导用户。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    r = runner.invoke(agent.app, ["ask", "问题", "--top-k", "0", "--no-context"])
+    assert r.exit_code != 0
+    assert "top-k" in (r.stdout + r.stderr).lower()
+
+
+def test_ask_min_score_negative_rejected(monkeypatch):
+    """R1 输入护栏：--min-score 负值立即报错（阈值不可为负）。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    r = runner.invoke(agent.app, ["ask", "问题", "--min-score", "-0.5", "--no-context"])
+    assert r.exit_code != 0
+    assert "min-score" in (r.stdout + r.stderr).lower()
+
+
+def test_ask_max_context_chars_negative_rejected(monkeypatch):
+    """R1 输入护栏：--max-context-chars 负值立即报错。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    r = runner.invoke(agent.app, ["ask", "问题", "--max-context-chars", "-1", "--no-context"])
+    assert r.exit_code != 0
+    assert "max-context-chars" in (r.stdout + r.stderr).lower()
+
+
+def test_context_topk_negative_rejected(monkeypatch):
+    """R1 输入护栏：context --top-k 负数立即报错（此前会被钳制成空召回）。"""
+    monkeypatch.setattr(agent, "load_index", lambda *a, **k: [1])
+    r = runner.invoke(agent.app, ["context", "问题", "--top-k", "-3"])
+    assert r.exit_code != 0
+    assert "top-k" in (r.stdout + r.stderr).lower()
+
+
+def test_valid_opts_pass_through(monkeypatch):
+    """回归：合法参数不应被护栏拦截（top_k>=1 正常进入检索路径）。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    monkeypatch.setattr(agent, "load_index", lambda: {"x": 1})
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000, **k: ("ctx", ["a.py"]))
+    r = runner.invoke(agent.app, ["ask", "问题", "--top-k", "3", "--min-score", "0.2", "--no-stream"])
+    assert r.exit_code == 0
+    assert "MOCK" in r.stdout
