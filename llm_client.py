@@ -33,12 +33,36 @@ DEFAULT_RETRIES = 1           # 瞬态错误的重试次数（不含首次）
 DEFAULT_BACKOFF = 0.2         # 指数退避基延迟（秒）
 DEFAULT_MAX_CONTEXT_TOKENS = 12000  # 发送给模型的历史 token 预算上限（防上下文溢出）
 
+# 默认系统提示（R2 修复重复 system 块时复用，避免多处硬编码同一字符串）
+DEFAULT_SYSTEM_PROMPT = (
+    "你是一个帮助理解代码仓库的助手。请基于下面提供的仓库上下文片段，"
+    "用中文准确、简洁地回答用户的问题。如果上下文不足以回答，请如实说明。"
+)
+
 # 判定为「值得重试」的瞬态错误关键词（网络抖动 / 限流 / 5xx）
 _TRANSIENT_KEYWORDS = (
     "timeout", "timed out", "connection", "reset by peer", "broken pipe",
     "429", "rate limit", "too many requests", "503", "502", "500",
     "temporary", "try again", "econnrefused", "etimedout",
 )
+
+
+def _compose_messages(messages, system_prompt):
+    """构造最终发给模型的 messages 列表。
+
+    R2 修复（隐性缺陷）：原先无条件前置 system 提示，若调用方已在
+    messages[0] 提供 system 消息，会产生「双 system 块」——既挤占 token，
+    又让模型对重复系统提示的行为不稳定。这里去重：
+      - 调用方已带 system 且未显式传 system_prompt → 保留调用方的 system；
+      - 调用方已带 system 且显式传 system_prompt → 以参数覆盖调用方 system；
+      - 调用方未带 system → 前置 system_prompt 或默认提示。
+    """
+    msgs = list(messages)
+    if msgs and msgs[0].get("role") == "system":
+        if system_prompt is not None:
+            msgs[0] = {"role": "system", "content": system_prompt}
+        return msgs
+    return [{"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT}] + msgs
 
 
 class LLMError(RuntimeError):
@@ -182,11 +206,7 @@ class LLMClient:
             self.last_usage = {"prompt_tokens": est, "completion_tokens": 0, "total_tokens": est}
             return self._mock_answer(question, context_files or [])
 
-        sys_prompt = system_prompt or (
-            "你是一个帮助理解代码仓库的助手。请基于下面提供的仓库上下文片段，"
-            "用中文准确、简洁地回答用户的问题。如果上下文不足以回答，请如实说明。"
-        )
-        full = [{"role": "system", "content": sys_prompt}] + list(messages)
+        full = _compose_messages(messages, system_prompt)
         # R2 隐性问题修复：超大历史会撑爆上下文窗口导致晦涩的 400 错误，
         # 发送前按 token 预算裁剪（保留 system 与最近的对话）。
         full, _trimmed = LLMClient.trim_messages_to_budget(full, self.config.max_context_tokens)
@@ -263,11 +283,7 @@ class LLMClient:
                 yield ch
             return
 
-        sys_prompt = system_prompt or (
-            "你是一个帮助理解代码仓库的助手。请基于下面提供的仓库上下文片段，"
-            "用中文准确、简洁地回答用户的问题。如果上下文不足以回答，请如实说明。"
-        )
-        full = [{"role": "system", "content": sys_prompt}] + list(messages)
+        full = _compose_messages(messages, system_prompt)
         # R2 隐性问题修复：与 complete 一致，流式发送前也按 token 预算裁剪，
         # 避免超大历史触发模型上下文溢出。
         full, _trimmed = LLMClient.trim_messages_to_budget(full, self.config.max_context_tokens)
@@ -367,3 +383,18 @@ class LLMClient:
                 "attempts": self.last_attempts,
                 "error": str(exc),
             }
+
+    def list_models(self) -> List[str]:
+        """列出端点可用的模型 id（R1 新能力，供 CLI `models` 命令 / 前端模型下拉复用）。
+
+        mock 模式不触网，直接返回 [当前模型]；真实模式查询 /models 端点；
+        失败统一包装为 LLMError（绝不裸抛 SDK 异常）。
+        """
+        if self.config.mock:
+            return [self.config.model]
+        try:
+            client = self._get_client()
+            resp = client.models.list()
+            return [m.id for m in getattr(resp, "data", [])]
+        except Exception as exc:
+            raise LLMError(f"获取模型列表失败：{exc}") from exc

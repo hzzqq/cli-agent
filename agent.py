@@ -758,6 +758,34 @@ def config(
 
 
 @app.command()
+def models(
+    as_json: bool = typer.Option(False, "--json", help="以 JSON 输出模型列表，便于脚本消费"),
+):
+    """列出当前 LLM 端点可用的模型（探测 /models 端点，mock 模式返回当前模型）。
+
+    R1 新能力：与 openwebui 的 /api/models 对称，让 CLI 用户也能快速查看可切换的模型，
+    无需手动拼 curl。探测失败（端点不可用 / 鉴权错误）时打印错误并以退出码 1 结束。
+    """
+    cfg = _build_config(None, None, None) or LLMConfig()
+    try:
+        model_ids = LLMClient(cfg).list_models()
+    except LLMError as exc:
+        typer.echo(f"❌ 获取模型列表失败：{exc}", err=True)
+        raise typer.Exit(code=1)
+    if as_json:
+        typer.echo(_json.dumps(
+            {"models": model_ids, "mock": cfg.mock}, ensure_ascii=False, indent=2
+        ))
+        return
+    if not model_ids:
+        typer.echo("ℹ️  端点未返回任何模型。")
+        return
+    typer.echo(f"📋 可用模型（{'mock 模式' if cfg.mock else '端点 ' + cfg.base_url}）：")
+    for mid in model_ids:
+        typer.echo(f"  - {mid}")
+
+
+@app.command()
 def clear(
     root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录"),
     yes: bool = typer.Option(False, "--yes", "-y", help="确认删除索引文件（避免误删，默认仅预览）"),

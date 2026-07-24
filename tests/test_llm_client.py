@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from llm_client import LLMClient, LLMConfig, LLMError  # noqa: E402
+from llm_client import LLMClient, LLMConfig, LLMError, _compose_messages  # noqa: E402
 
 
 def test_stream_complete_mock_yields_full_text():
@@ -288,3 +288,98 @@ def test_default_top_p_applied(monkeypatch):
     c = LLMClient(LLMConfig(mock=False))
     c.complete([{"role": "user", "content": "q"}])
     assert captured.get("top_p") == 1.0
+
+
+def test_compose_messages_no_system_prepends_default():
+    """R2 验证：无 system 时前置默认系统提示。"""
+    out = _compose_messages([{"role": "user", "content": "q"}], None)
+    assert out[0]["role"] == "system"
+    assert len(out) == 2
+
+
+def test_compose_messages_keeps_caller_system():
+    """R2 验证：调用方已带 system 消息时保留之，不重复前置。"""
+    msgs = [{"role": "system", "content": "mine"}, {"role": "user", "content": "q"}]
+    out = _compose_messages(msgs, None)
+    assert out[0]["content"] == "mine"
+    assert len(out) == 2
+
+
+def test_compose_messages_system_prompt_overrides():
+    """R2 验证：显式传 system_prompt 时覆盖调用方自带 system。"""
+    msgs = [{"role": "system", "content": "mine"}, {"role": "user", "content": "q"}]
+    out = _compose_messages(msgs, "override")
+    assert out[0]["content"] == "override"
+    assert len(out) == 2
+
+
+def test_compose_messages_explicit_system_prompt_prepends():
+    out = _compose_messages([{"role": "user", "content": "q"}], "custom")
+    assert out[0] == {"role": "system", "content": "custom"}
+
+
+def test_complete_existing_system_not_duplicated(monkeypatch):
+    """R2 验证：调用方已带 system 消息时，complete 不生成「双 system 块」。"""
+    captured = {}
+
+    class _C:
+        def create(self, **kw):
+            captured["messages"] = kw["messages"]
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+
+    class _Chat:
+        completions = _C()
+
+    class _Client:
+        chat = _Chat()
+
+    monkeypatch.setattr(LLMClient, "_get_client", lambda self: _Client())
+    c = LLMClient(LLMConfig(mock=False))
+    c.complete([{"role": "system", "content": "caller"}, {"role": "user", "content": "q"}])
+    msgs = captured["messages"]
+    assert sum(1 for m in msgs if m["role"] == "system") == 1
+    assert msgs[0]["content"] == "caller"
+
+
+def test_list_models_mock():
+    """R1 验证：mock 模式返回 [当前模型]。"""
+    c = LLMClient(LLMConfig(mock=True))
+    assert c.list_models() == [c.config.model]
+
+
+def test_list_models_real(fake_client, monkeypatch):
+    """R1 验证：真实模式从 /models 端点取回 id 列表。"""
+
+    class _Model:
+        def __init__(self, i):
+            self.id = i
+
+    class _Models:
+        def list(self):
+            return SimpleNamespace(data=[_Model("a"), _Model("b")])
+
+    class _Client2:
+        models = _Models()
+
+    monkeypatch.setattr(LLMClient, "_get_client", lambda self: _Client2())
+    c = LLMClient(LLMConfig(mock=False))
+    assert c.list_models() == ["a", "b"]
+
+
+def test_list_models_real_error(monkeypatch):
+    """R1 验证：端点异常被统一包装为 LLMError。"""
+
+    class _Bad:
+        def list(self):
+            raise RuntimeError("500 boom")
+
+    class _Client3:
+        models = _Bad()
+
+    monkeypatch.setattr(LLMClient, "_get_client", lambda self: _Client3())
+    c = LLMClient(LLMConfig(mock=False))
+    with pytest.raises(LLMError):
+        c.list_models()

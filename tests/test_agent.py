@@ -915,3 +915,34 @@ def test_ask_file_non_utf8_no_crash(monkeypatch, tmp_path):
     r = runner.invoke(agent.app, ["ask", "占位", "--file", str(q_file)])
     assert r.exit_code == 0
     assert isinstance(captured.get("question"), str)
+
+
+def test_models_command_lists_current(monkeypatch):
+    """R1 验证：mock 模式下 `models` 命令打印当前模型且退出码 0。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    r = runner.invoke(agent.app, ["models"])
+    assert r.exit_code == 0
+    assert "qwen2.5:latest" in r.output
+
+
+def test_models_command_json(monkeypatch):
+    """R1 验证：`models --json` 输出结构化模型列表且 mock=True。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    r = runner.invoke(agent.app, ["models", "--json"])
+    assert r.exit_code == 0
+    data = agent._json.loads(r.output)
+    assert data["mock"] is True
+    assert "qwen2.5:latest" in data["models"]
+
+
+def test_models_command_failure(monkeypatch):
+    """R1 验证：端点探测失败时打印错误并以退出码 1 结束（不裸抛异常）。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+
+    def boom(self):
+        raise agent.LLMError("探测失败")
+
+    monkeypatch.setattr(agent.LLMClient, "list_models", boom)
+    r = runner.invoke(agent.app, ["models"])
+    assert r.exit_code == 1
+    assert "获取模型列表失败" in r.output
