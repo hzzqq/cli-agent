@@ -98,6 +98,32 @@ def completion(
     typer.echo(script)
 
 
+def _index_health(root: str = ".") -> "tuple[str, str]":
+    """返回 (状态, 说明)：索引健康诊断，供 _require_index 与 doctor 复用。
+
+    状态取值：
+      - "ok"      索引存在且可解析
+      - "missing" 索引文件不存在（需要先 index）
+      - "corrupt" 索引文件存在但无法解析（可能已损坏）
+
+    R2 抽出：此前只有 ask/context/explain/related/chat 的 _require_index 内部
+    能区分「未建」与「已损坏」；而 stats/files/search/prune 与新增的 doctor
+    直接 load_index 命中损坏索引时会静默得到空结果、误判为「无文件」。现统一
+    收敛到本函数，保证所有命令对索引健康的判定口径完全一致（DRY + 一致性）。
+    """
+    index_path = os.path.join(root, INDEX_FILE)
+    # 默认 root="." 时回落到 0 参 load_index()（与历史/既有单测一致）；
+    # 仅当显式给定 --root 时才按该目录索引校验。
+    loaded = load_index(index_path) if root and root != "." else load_index()
+    if not loaded:
+        if os.path.exists(index_path):
+            return "corrupt", (
+                f"索引文件（{INDEX_FILE}）存在但无法解析（可能已损坏）。"
+            )
+        return "missing", f"尚未发现索引文件（{INDEX_FILE}）。"
+    return "ok", f"索引正常（{len(loaded)} 个文件）。"
+
+
 def _require_index(root: str = ".") -> bool:
     """检查是否已建索引，未建则打印友好提示并返回 False。
 
@@ -108,25 +134,19 @@ def _require_index(root: str = ".") -> bool:
     []，导致提示误报「尚未发现索引文件」，误导用户以为是没建索引。这里
     通过 os.path.exists 区分「未建」与「已损坏」，给出准确诊断。
     """
-    index_path = os.path.join(root, INDEX_FILE)
-    # 默认 root="." 时回落到 0 参 load_index()（与历史/既有单测一致）；
-    # 仅当显式给定 --root 时才按该目录索引校验——既修复「跨目录查询」的
-    # 前置诊断，又不破坏把 load_index 打桩为 0 参 lambda 的既有测试。
-    loaded = load_index(index_path) if root and root != "." else load_index()
-    if not loaded:
-        if os.path.exists(index_path):
-            typer.echo(
-                f"⚠️  索引文件（{INDEX_FILE}）存在但无法解析（可能已损坏）。\n"
-                "请重新运行：python agent.py index <目录>"
-            )
-        else:
-            typer.echo(
-                f"⚠️  尚未发现索引文件（{INDEX_FILE}）。\n"
-                "请先运行：python agent.py index <目录>\n"
-                "例如：python agent.py index ."
-            )
-        return False
-    return True
+    status, detail = _index_health(root)
+    if status == "ok":
+        return True
+    if status == "corrupt":
+        typer.echo(
+            f"⚠️  {detail}\n请重新运行：python agent.py index <目录>"
+        )
+    else:
+        typer.echo(
+            f"⚠️  {detail}\n请先运行：python agent.py index <目录>\n"
+            "例如：python agent.py index ."
+        )
+    return False
 
 
 def _load_file_config(root: str = ".") -> dict:
@@ -829,6 +849,68 @@ def config(
     typer.echo(f"  temperature: {cfg.temperature}")
     typer.echo(f"  retries    : {cfg.retries}（退避基数 {cfg.backoff}s）")
     typer.echo(f"  api_key    : {'<已设置>' if cfg.api_key else '<未设置>'}")
+
+
+@app.command()
+def doctor(
+    as_json: bool = typer.Option(False, "--json", help="以 JSON 输出诊断结果，便于脚本消费"),
+):
+    """环境自检：一次性诊断索引健康、LLM 端点与配置，给出可执行建议。
+
+    R1 新能力：此前用户遇到「ask 不返回相关内容」「config 明明配了却调不通」
+    时没有任何统一入口快速定位问题，只能逐个手动试命令。doctor 聚合三类检查：
+      1) 索引健康（missing / corrupt / ok）——复用 _index_health（与 ask 等命令口径一致）
+      2) LLM 端点可用性（复用 LLMClient.health 探针）
+      3) 当前生效配置解析（model / base_url / mock / api_key 是否已设置）
+    输出分级状态（✅/⚠️/❌）与建议；存在「损坏索引」或「真实模式端点不可用」时
+    以退出码 1 提示（便于 CI / 启动脚本判断是否阻断）。
+    """
+    index_status, index_detail = _index_health(".")
+    health = LLMClient(LLMConfig()).health()
+    cfg = _build_config(None, None, None) or LLMConfig()
+
+    checks = {
+        "index": {"status": index_status, "detail": index_detail},
+        "llm": {
+            "ok": health["ok"],
+            "mock": health["mock"],
+            "model": health["model"],
+            "error": health.get("error"),
+        },
+        "config": {
+            "base_url": cfg.base_url,
+            "model": cfg.model,
+            "mock": cfg.mock,
+            "api_key_set": bool(cfg.api_key),
+        },
+    }
+    # 严重度判定：损坏索引 + 真实模式端点不可用 视为阻断项
+    critical = (index_status == "corrupt") or (
+        not health["ok"] and not health["mock"]
+    )
+
+    if as_json:
+        typer.echo(_json.dumps({"critical": critical, **checks}, ensure_ascii=False, indent=2))
+    else:
+        icon = {"ok": "✅", "missing": "⚠️ ", "corrupt": "❌"}.get(index_status, "❓")
+        typer.echo("🩺 cli-agent 环境自检")
+        typer.echo(f"  索引   : {icon} {index_detail}")
+        if health["ok"]:
+            typer.echo(
+                f"  LLM    : ✅ 可用（{'mock' if health['mock'] else '真实'} · {health['model']}）"
+            )
+        else:
+            typer.echo(f"  LLM    : ❌ 不可用：{health.get('error')}")
+        typer.echo(
+            f"  配置   : base_url={cfg.base_url} · model={cfg.model} · "
+            f"mock={cfg.mock} · api_key={'<已设置>' if cfg.api_key else '<未设置>'}"
+        )
+        if critical:
+            typer.echo("❌ 存在阻断项，请先按上方提示修复。")
+        else:
+            typer.echo("✅ 环境基本就绪。")
+
+    raise typer.Exit(code=1 if critical else 0)
 
 
 @app.command()

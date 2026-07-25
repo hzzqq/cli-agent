@@ -1005,3 +1005,43 @@ def test_valid_opts_pass_through(monkeypatch):
     r = runner.invoke(agent.app, ["ask", "问题", "--top-k", "3", "--min-score", "0.2", "--no-stream"])
     assert r.exit_code == 0
     assert "MOCK" in r.stdout
+
+
+def test_doctor_reports_healthy(monkeypatch):
+    """R1 新需求验证：doctor 在索引正常 + LLM 可用时报告就绪且退出码 0。"""
+    monkeypatch.setattr(agent, "load_index", lambda *a, **k: [1])
+    monkeypatch.setattr(
+        agent.LLMClient, "health",
+        lambda self: {"ok": True, "mock": False, "model": "x", "attempts": 1, "error": None},
+    )
+    r = runner.invoke(agent.app, ["doctor"])
+    assert r.exit_code == 0
+    assert "环境基本就绪" in r.stdout
+
+
+def test_doctor_corrupt_index_is_critical(monkeypatch):
+    """R2 验证：损坏索引被 doctor 判定为阻断项（退出码 1），而非静默当作无文件。"""
+    monkeypatch.setattr(agent, "load_index", lambda *a, **k: [])
+    monkeypatch.setattr(agent, "_index_health", lambda root=".": ("corrupt", "索引文件存在但无法解析"))
+    monkeypatch.setattr(
+        agent.LLMClient, "health",
+        lambda self: {"ok": True, "mock": True, "model": "x", "attempts": 0, "error": None},
+    )
+    r = runner.invoke(agent.app, ["doctor"])
+    assert r.exit_code == 1
+    assert "阻断项" in r.stdout
+
+
+def test_doctor_json_structure(monkeypatch):
+    """R1 验证：doctor --json 输出结构化检查结果（index/llm/config 三段 + critical 标志）。"""
+    monkeypatch.setattr(agent, "load_index", lambda *a, **k: [1, 2])
+    monkeypatch.setattr(
+        agent.LLMClient, "health",
+        lambda self: {"ok": True, "mock": True, "model": "x", "attempts": 0, "error": None},
+    )
+    r = runner.invoke(agent.app, ["doctor", "--json"])
+    assert r.exit_code == 0
+    data = _json.loads(r.stdout)
+    assert data["critical"] is False
+    assert data["index"]["status"] == "ok"
+    assert "llm" in data and "config" in data
