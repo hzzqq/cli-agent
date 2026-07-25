@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json as _json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -26,6 +27,9 @@ import typer
 from index_store import build_index, save_index, load_index, INDEX_FILE
 from retriever import build_context
 from llm_client import LLMClient, LLMConfig, LLMError
+from log_utils import setup_logging
+
+log = logging.getLogger("cli_agent")
 
 # 版本号：随每次功能性迭代递增，便于用户/脚本识别 CLI 能力级别。
 VERSION = "1.0.0"
@@ -40,6 +44,23 @@ app = typer.Typer(
     help="垂直代码库问答 CLI 智能体：index 建索引，ask 单轮问答，chat 多轮对话。",
     no_args_is_help=True,
 )
+
+
+@app.callback()
+def _cli_callback(
+    log_level: str = typer.Option(
+        "INFO", "--log-level", help="日志级别：DEBUG/INFO/WARNING/ERROR（诊断信息写 stderr）"
+    ),
+    log_file: Optional[str] = typer.Option(
+        None, "--log-file", help="日志输出文件（默认 stderr；批处理可落盘排查）"
+    ),
+):
+    """全局日志配置（R1 新能力：批处理可观测性，不污染 stdout 结果）。"""
+    try:
+        setup_logging(log_level, log_file)
+    except Exception:
+        # 日志初始化失败绝不影响主流程
+        pass
 
 
 @app.command()
@@ -409,6 +430,7 @@ def index(
     # 却得到空索引并在后续 ask 时困惑「为何检索不到」。现显式区分并快速失败。
     if not os.path.isdir(path):
         typer.echo(f"⚠️ 索引目标路径不存在或不是目录：{path}", err=True)
+        log.error("索引失败：目标路径不是目录 %s", path)
         raise typer.Exit(code=1)
     exts = None
     if ext:
@@ -432,8 +454,10 @@ def index(
         exclude_list = [e.strip() for e in exclude.split(",") if e.strip()]
         if not as_json:
             typer.echo(f"🚫 忽略模式：{', '.join(exclude_list)}")
+    log.info("开始索引 path=%s exts=%s max_size=%s min_size=%s incremental=%s", path, exts, max_size, min_size, incremental)
     entries, skipped = build_index(path, exts=exts, max_size=max_size, min_size=min_size, prev=prev, exclude=exclude_list)
     out = save_index(entries, root)
+    log.info("索引完成 path=%s files=%d skipped=%d index=%s", path, len(entries), len(skipped), out)
     if as_json:
         # R1 新能力：机读索引摘要，便于 CI / 流水线消费（与 search/files/related 一致）
         payload = {
