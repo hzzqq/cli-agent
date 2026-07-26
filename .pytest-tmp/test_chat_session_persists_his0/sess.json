@@ -1,0 +1,10 @@
+[
+  {
+    "role": "user",
+    "content": "你好"
+  },
+  {
+    "role": "assistant",
+    "content": "（MOCK 模式）未检索到相关文件。请先运行 `index <path>` 建立索引，或确认问题与仓库内容相关。"
+  }
+]

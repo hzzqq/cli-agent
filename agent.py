@@ -295,6 +295,24 @@ def _validate_retrieval_opts(
         raise typer.BadParameter(f"--max-context-chars 必须 >= 0（当前 {max_context_chars}）")
 
 
+def _dump_context_to_file(path: str, text: str, paths: "List[str]") -> None:
+    """将组装好的检索上下文写入文件（供离线审阅 / 调试）。
+
+    R2 隐性边界加固：自动创建父目录（--save 指向子目录时不再因目录不存在而崩溃）；
+    空上下文也写入一个明确占位，避免「文件不存在」与「检索为空」的歧义。
+    """
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if not text:
+        content = "(无上下文：未检索到相关文件)\n"
+    else:
+        header = "\n".join(f"# 参考文件: {p}" for p in paths) + "\n\n"
+        content = header + text
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
 def _resolve_system_prompt(
     inline: Optional[str], file_path: Optional[str]
 ) -> "Optional[str]":
@@ -533,17 +551,111 @@ def ask(
 
 
 @app.command()
+def batch(
+    questions_file: Optional[str] = typer.Option(
+        None, "--file", help="问题清单文件，每行一条问题（与批量脚本/CI 配合）"
+    ),
+    top_k: int = typer.Option(5, "--top-k", "-k", help="召回的相关文件数量"),
+    min_score: float = typer.Option(0.0, "--min-score", help="最低相关度阈值，过滤弱相关文件"),
+    model: Optional[str] = typer.Option(None, "--model", help="指定模型名称"),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="指定 API 地址"),
+    api_key: Optional[str] = typer.Option(None, "--api-key", help="指定 API Key"),
+    max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="最大生成 token 数"),
+    temperature: Optional[float] = typer.Option(None, "--temperature", help="采样温度"),
+    timeout: Optional[float] = typer.Option(None, "--timeout", help="请求超时秒数"),
+    top_p: Optional[float] = typer.Option(None, "--top-p", help="nucleus 采样阈值"),
+    system_prompt: Optional[str] = typer.Option(None, "--system-prompt", help="自定义系统提示（内联）"),
+    system_prompt_file: Optional[str] = typer.Option(None, "--system-prompt-file", help="从文件读取系统提示（优先）"),
+    no_context: bool = typer.Option(False, "--no-context", help="跳过仓库检索，直接把问题交给 LLM"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="打印每条问题的检索概况"),
+    max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符）"),
+    out_path: Optional[str] = typer.Option(None, "--out", help="把批量问答写入文件（配合 --out-format）"),
+    out_format: str = typer.Option("md", "--out-format", help="批量输出格式：md 或 json"),
+    root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录"),
+):
+    """批量问答：从清单文件或标准输入读取多行问题，逐条基于索引作答。
+
+    R1 新能力：把多条问题一次性跑完，便于脚本化/CI 批量校验或离线把仓库问答
+    沉淀为知识库。某条失败时不影响其余问题（隔离错误，不整体中断）。
+    """
+    _validate_retrieval_opts(top_k, min_score, max_context_chars)
+    questions: list = []
+    if questions_file:
+        try:
+            raw = Path(questions_file).read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            typer.echo(f"⚠️ 无法读取问题清单：{exc}", err=True)
+            raise typer.Exit(code=1)
+        questions = [q.strip() for q in raw.splitlines() if q.strip()]
+    elif not sys.stdin.isatty():
+        questions = [q.strip() for q in sys.stdin.read().splitlines() if q.strip()]
+    if not questions:
+        typer.echo(
+            "⚠️ 未提供任何问题（--file 清单或管道：cat q.txt | python agent.py batch）",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if not no_context and not _require_index(root):
+        raise typer.Exit(code=1)
+    cfg = _build_config(
+        model, base_url, api_key, max_tokens=max_tokens, temperature=temperature,
+        top_p=top_p, timeout=timeout,
+    )
+    sp = _resolve_system_prompt(system_prompt, system_prompt_file)
+    index_path = os.path.join(root, INDEX_FILE)
+    results = []
+    failed = 0
+    for i, q in enumerate(questions, 1):
+        typer.echo(f"\n===== [{i}/{len(questions)}] {q} =====")
+        try:
+            # 批量场景默认非流式，避免多条答案逐 token 交错难以阅读
+            ans = _do_ask(
+                q, top_k, config=cfg, as_json=False, min_score=min_score,
+                system_prompt=sp, no_context=no_context, verbose=verbose,
+                max_context_chars=max_context_chars, stream=False,
+                explain=False, index_path=index_path,
+            )
+            results.append({"question": q, "answer": ans, "error": None})
+        except typer.Exit:
+            # _do_ask 内部 LLM 失败会 raise typer.Exit；批量场景隔离错误继续下一条
+            failed += 1
+            results.append({"question": q, "answer": None, "error": "LLM 调用失败"})
+            typer.echo(f"⚠️ 第 {i} 条问题作答失败，继续下一条。")
+            continue
+    typer.echo(f"\n===== 批量完成：{len(questions) - failed}/{len(questions)} 成功 =====")
+    if out_path:
+        try:
+            if out_format == "json":
+                Path(out_path).write_text(
+                    _json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            else:
+                blocks = []
+                for r in results:
+                    blocks.append(f"## Q: {r['question']}\n\n"
+                                   f"{r['answer'] if r['answer'] is not None else '（作答失败）'}")
+                Path(out_path).write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+            typer.echo(f"💾 批量结果已保存至：{out_path}")
+        except OSError as exc:
+            typer.echo(f"⚠️ 无法写入批量结果文件：{exc}", err=True)
+            raise typer.Exit(code=1)
+
+
+@app.command()
 def context(
     question: str = typer.Argument(..., help="要检索的问题，用引号包裹"),
     top_k: int = typer.Option(5, "--top-k", "-k", help="召回的相关文件数量"),
     min_score: float = typer.Option(0.0, "--min-score", help="最低相关度阈值，过滤弱相关文件"),
     max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符）"),
     as_json: bool = typer.Option(False, "--json", help="以 JSON 输出检索上下文与参考文件，便于脚本消费"),
+    save: "Optional[str]" = typer.Option(None, "--save", help="将组装好的上下文写入指定文件（便于离线审阅/调试，自动创建父目录）"),
     root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录（与 index 的 --root 对齐）"),
 ):
     """仅展示检索到的上下文与参考文件（不调用 LLM）。
 
     便于排查检索质量、核对参考来源，或在不想消耗 LLM 额度时预览。
+    R1 新能力：--save PATH 把组装好的上下文落盘，便于离线审阅、调试检索质量、
+    或作为 CI 产物归档；空上下文也写入占位文件，避免「文件不存在」歧义。
     """
     _validate_retrieval_opts(top_k, min_score, max_context_chars)
     # R2 修复（隐性诊断缺陷）：原实现直接调用 build_context，在无索引时
@@ -554,8 +666,14 @@ def context(
     index_path = os.path.join(root, INDEX_FILE)
     text, paths = build_context(question, top_k=top_k, min_score=min_score,
                                   max_context_chars=max_context_chars, index_path=index_path)
+    if save:
+        # R1 新能力：上下文落盘（R2 边界：自动建父目录 + 空上下文占位）
+        _dump_context_to_file(save, text, paths)
+        typer.echo(f"💾 上下文已写入：{save}")
     if not paths:
         typer.echo("🔎 未检索到相关文件，请确认问题与仓库内容相关。")
+        if save:
+            return  # 已通过 --save 交付占位文件，视为成功
         raise typer.Exit(code=1)
     if as_json:
         # R1 新能力：机读输出上下文与参考文件，与 search/files/related 对齐
@@ -973,22 +1091,23 @@ def clear(
     """删除当前索引文件（重置索引）。
 
     默认只预览将被删除的文件，需加 --yes / -y 才真正删除，防止在非交互场景下误删。
+    R3 复用 index_store.clear_index（幂等、root 感知），避免两处重复的文件删除逻辑。
     """
-    from index_store import INDEX_FILE
+    from index_store import INDEX_FILE, clear_index
 
-    path = os.path.join(root, INDEX_FILE)
-    if not os.path.exists(path):
-        typer.echo(f"ℹ️  没有可删除的索引文件（{path}）")
+    target = os.path.join(root, INDEX_FILE) if root and root != "." else INDEX_FILE
+    if not os.path.exists(target):
+        typer.echo(f"ℹ️  没有可删除的索引文件（{target}）")
         return
     if not yes:
-        typer.echo(f"🔍 将删除索引文件：{path}\n（确认请加 --yes / -y）")
+        typer.echo(f"🔍 将删除索引文件：{target}\n（确认请加 --yes / -y）")
         return
-    try:
-        os.remove(path)
-        typer.echo(f"🗑️  已删除索引文件：{path}")
-    except OSError as exc:
-        typer.echo(f"⚠️ 删除失败：{exc}", err=True)
-        raise typer.Exit(code=1)
+    # R3：委派给 clear_index 统一处理删除与异常（幂等、root 感知）
+    if clear_index(root):
+        typer.echo(f"🗑️  已删除索引文件：{target}")
+        log.info("索引已清空 root=%s", root)
+    else:
+        typer.echo(f"ℹ️  未发现索引文件，无需清理：{target}")
 
 
 @app.command()

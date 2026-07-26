@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from index_store import build_index, index_stats, INDEX_FILE  # noqa: E402
+from index_store import build_index, index_stats, INDEX_FILE, clear_index, save_index, IndexEntry  # noqa: E402
 from typer.testing import CliRunner  # noqa: E402
 import agent  # noqa: E402
 
@@ -288,3 +288,29 @@ def test_index_stats_tolerates_corrupt_entry(tmp_path):
     assert stats is not None
     assert stats["file_count"] == 1   # 仅完好条目被统计，坏条目被跳过
     assert stats["total_bytes"] == 10
+
+
+def test_clear_index_removes_and_is_idempotent(tmp_path):
+    """R1 新能力验证：clear_index 删除已存在的索引返回 True，且无索引时幂等返回 False。"""
+    idx_dir = tmp_path / "sub"
+    idx_dir.mkdir()
+    save_index([IndexEntry(path="a.py", size=3, snippet="x=1")], str(idx_dir))
+    assert (idx_dir / ".cliagent_index.json").exists()
+    # 首次清空：确实删除
+    assert clear_index(str(idx_dir)) is True
+    assert not (idx_dir / ".cliagent_index.json").exists()
+    # 再次清空：幂等，不报错、返回 False（R2 边界：无文件时不应误删/报错）
+    assert clear_index(str(idx_dir)) is False
+
+
+def test_clear_index_respects_root(tmp_path):
+    """R2 验证：clear_index(root) 只清该目录的索引，不动 cwd 的索引。"""
+    save_index([IndexEntry(path="cwd.py", size=3, snippet="x=1")])  # cwd 索引
+    other = tmp_path / "other"
+    other.mkdir()
+    save_index([IndexEntry(path="o.py", size=2, snippet="y=2")], str(other))
+    # 清 other，cwd 不受影响
+    assert clear_index(str(other)) is True
+    # cwd 的索引文件应仍保留（未被误清）
+    assert (Path(".cliagent_index.json")).exists()
+    clear_index(".")  # 清理本测试在 cwd 留下的索引，避免污染

@@ -229,6 +229,25 @@ def prune_missing(root: str, index_path: str = INDEX_FILE) -> int:
     return removed
 
 
+def clear_index(root: str = ".") -> bool:
+    """删除（清空）索引文件。
+
+    返回 True 表示确实删除了索引；False 表示该目录下本就没有索引文件
+    （幂等：重复调用不产生错误，也不会误删其它文件）。仅删除已知的
+    INDEX_FILE 文件名，不接收任意路径，避免误删风险。
+
+    root：索引文件所在目录（与 index --root 对齐），默认当前目录。
+    """
+    out_path = os.path.join(root, INDEX_FILE) if root and root != "." else INDEX_FILE
+    if not os.path.exists(out_path):
+        return False
+    try:
+        os.remove(out_path)
+        return True
+    except OSError:
+        return False
+
+
 def index_stats(index_path: str = INDEX_FILE) -> "Dict | None":
     """返回索引统计信息；无索引（或文件损坏）时返回 None（供 CLI 友好提示）。
 

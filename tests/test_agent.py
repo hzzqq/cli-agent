@@ -55,6 +55,33 @@ def test_context_command_json(monkeypatch):
     assert data["files"] == ["a.py", "b.py"]
 
 
+def test_context_command_save_writes_file(monkeypatch, tmp_path):
+    """R1 新需求验证：context --save PATH 把上下文落盘（自动建父目录）。"""
+    monkeypatch.setattr(agent, "load_index", lambda *a, **k: [1])
+    monkeypatch.setattr(
+        agent, "build_context",
+        lambda q, top_k=5, min_score=0.0, max_context_chars=6000, **k: ("这是一段上下文", ["a.py", "b.py"])
+    )
+    out = tmp_path / "sub" / "ctx.txt"  # 父目录尚不存在
+    r = runner.invoke(agent.app, ["context", "问题", "--save", str(out)])
+    assert r.exit_code == 0
+    assert out.exists()  # 父目录被自动创建（R2 边界）
+    content = out.read_text(encoding="utf-8")
+    assert "这是一段上下文" in content
+    assert "# 参考文件: a.py" in content
+
+
+def test_context_command_save_empty_placeholder(monkeypatch, tmp_path):
+    """R2 边界验证：空上下文也写占位文件，避免「文件不存在」歧义，且 --save 时退出码 0。"""
+    monkeypatch.setattr(agent, "load_index", lambda *a, **k: [1])
+    monkeypatch.setattr(agent, "build_context", lambda q, top_k=5, min_score=0.0, max_context_chars=6000, **k: ("", []))
+    out = tmp_path / "empty.txt"
+    r = runner.invoke(agent.app, ["context", "无关问题", "--save", str(out)])
+    assert r.exit_code == 0
+    assert out.exists()
+    assert "无上下文" in out.read_text(encoding="utf-8")
+
+
 def test_explain_command_json(monkeypatch):
     """R1 新需求验证：explain --json 输出结构化解释数组。"""
     monkeypatch.setattr(agent, "load_index", lambda *a, **k: [1])
@@ -1045,3 +1072,64 @@ def test_doctor_json_structure(monkeypatch):
     assert data["critical"] is False
     assert data["index"]["status"] == "ok"
     assert "llm" in data and "config" in data
+
+
+class _FakeClient:
+    """供 batch 测试：complete 返回固定答案，无需真实 LLM。"""
+
+    def __init__(self, config=None):
+        self.config = config
+
+    def complete(self, messages, context_files=None, system_prompt=None):
+        return "模拟答案"
+
+
+def test_batch_runs_all_questions_and_writes_md(monkeypatch, tmp_path):
+    """R1 新需求验证：batch 从清单逐条作答，全部成功并写出 markdown。"""
+    monkeypatch.setattr(agent, "_require_index", lambda root=".": True)
+    monkeypatch.setattr(agent, "build_context", lambda *a, **k: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent, "LLMClient", _FakeClient)
+    qfile = tmp_path / "q.txt"
+    qfile.write_text("问题一\n问题二\n问题三\n", encoding="utf-8")
+    out = tmp_path / "out.md"
+    r = runner.invoke(agent.app, ["batch", "--file", str(qfile), "--out", str(out)])
+    assert r.exit_code == 0
+    assert "3 成功" in r.stdout
+    content = out.read_text(encoding="utf-8")
+    assert content.count("## Q:") == 3
+    assert "问题一" in content and "问题三" in content
+
+
+def test_batch_isolates_failure(monkeypatch, tmp_path):
+    """R2 验证：单条作答失败时 batch 不整体中断，继续跑其余问题。"""
+
+    class _BoomThenOk:
+        def __init__(self, config=None):
+            self.config = config
+            self.calls = 0
+
+        def complete(self, messages, context_files=None, system_prompt=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise agent.LLMError("第 1 条失败")
+            return "模拟答案"
+
+    monkeypatch.setattr(agent, "_require_index", lambda root=".": True)
+    monkeypatch.setattr(agent, "build_context", lambda *a, **k: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent, "LLMClient", _BoomThenOk)
+    qfile = tmp_path / "q.txt"
+    qfile.write_text("坏问题\n好问题\n", encoding="utf-8")
+    out = tmp_path / "out.json"
+    r = runner.invoke(agent.app, ["batch", "--file", str(qfile), "--out", str(out), "--out-format", "json"])
+    assert r.exit_code == 0
+    assert "1/2 成功" in r.stdout
+    data = _json.loads(out.read_text(encoding="utf-8"))
+    assert data[0]["error"] is not None
+    assert data[1]["answer"] == "模拟答案"
+
+
+def test_batch_empty_input(tmp_path):
+    """非法护栏：未提供任何问题时退出码 1 且不崩溃。"""
+    r = runner.invoke(agent.app, ["batch"])
+    assert r.exit_code == 1
+    assert "未提供任何问题" in (r.stderr or r.stdout)

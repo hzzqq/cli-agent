@@ -68,6 +68,66 @@ def test_stream_complete_real_path(monkeypatch):
     assert captured["stream"] is True
 
 
+def test_stream_complete_retries_on_transient(monkeypatch):
+    """R1/R2 验证：建立流遇瞬态错误时按重试次数恢复，最终成功产出。"""
+    calls = {"n": 0}
+
+    class _FakeDelta:
+        def __init__(self, c): self.content = c
+
+    class _FakeChunk:
+        def __init__(self, c):
+            self.choices = [SimpleNamespace(delta=_FakeDelta(c))]
+
+    class _FakeStream:
+        def __init__(self): self._parts = ["ok"]
+        def __iter__(self):
+            for p in self._parts:
+                yield _FakeChunk(p)
+
+    class _FakeCompletions:
+        def create(self, **kw):
+            calls["n"] += 1
+            if calls["n"] < 3:  # 前两次模拟瞬态失败
+                raise TimeoutError("connection timeout")
+            return _FakeStream()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    monkeypatch.setattr(LLMClient, "_get_client", lambda self: _FakeClient())
+    cli = LLMClient(LLMConfig(mock=False, retries=3, backoff=0))
+    out = list(cli.stream_complete([{"role": "user", "content": "q"}]))
+    assert out == ["ok"]
+    assert cli.last_attempts == 3
+    assert cli.last_error is None
+
+
+def test_stream_complete_no_retry_on_non_transient(monkeypatch):
+    """R2 验证：建立流遇非瞬态错误立即放弃（不重试），并包装为 LLMError。"""
+    calls = {"n": 0}
+
+    class _FakeCompletions:
+        def create(self, **kw):
+            calls["n"] += 1
+            raise ValueError("auth failed")  # 非瞬态
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    monkeypatch.setattr(LLMClient, "_get_client", lambda self: _FakeClient())
+    cli = LLMClient(LLMConfig(mock=False, retries=3, backoff=0))
+    with pytest.raises(LLMError):
+        list(cli.stream_complete([{"role": "user", "content": "q"}]))
+    assert cli.last_attempts == 1  # 未重试
+
+
 class _FakeCompletions:
     def __init__(self, content="ok", usage=None, raise_exc=None):
         self._content = content
@@ -383,3 +443,112 @@ def test_list_models_real_error(monkeypatch):
     c = LLMClient(LLMConfig(mock=False))
     with pytest.raises(LLMError):
         c.list_models()
+
+
+def test_build_sampling_params_includes_penalties():
+    """R1 验证：采样参数构造器汇总 temperature/top_p/frequency/presence。"""
+    c = LLMClient(LLMConfig(mock=False, temperature=0.5, top_p=0.9,
+                             frequency_penalty=0.3, presence_penalty=0.2))
+    p = c._build_sampling_params()
+    assert p["temperature"] == 0.5
+    assert p["top_p"] == 0.9
+    assert p["frequency_penalty"] == 0.3
+    assert p["presence_penalty"] == 0.2
+    assert p["max_tokens"] == 1024
+
+
+def test_complete_passes_penalties(monkeypatch):
+    """R1/R2 验证：frequency/presence 惩罚须真正透传到 SDK 调用。"""
+    captured = {}
+
+    class _C:
+        def create(self, **kw):
+            captured.update(kw)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+
+    class _Chat:
+        completions = _C()
+
+    class _Client:
+        chat = _Chat()
+
+    monkeypatch.setattr(LLMClient, "_get_client", lambda self: _Client())
+    c = LLMClient(LLMConfig(mock=False, frequency_penalty=0.4, presence_penalty=0.25))
+    c.complete([{"role": "user", "content": "q"}])
+    assert captured.get("frequency_penalty") == 0.4
+    assert captured.get("presence_penalty") == 0.25
+
+
+def test_stream_complete_passes_penalties(monkeypatch):
+    """R1/R2 验证：流式路径与完整路径共用同一套采样参数（DRY，不分叉）。"""
+    captured = {}
+
+    class _FakeDelta:
+        def __init__(self, c): self.content = c
+
+    class _FakeChunk:
+        def __init__(self, c):
+            self.choices = [SimpleNamespace(delta=_FakeDelta(c))]
+
+    class _FakeStream:
+        def __init__(self): self._parts = ["ok"]
+        def __iter__(self):
+            for p in self._parts:
+                yield _FakeChunk(p)
+
+    class _FakeCompletions:
+        def create(self, **kw):
+            captured.update(kw)
+            return _FakeStream()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    monkeypatch.setattr(LLMClient, "_get_client", lambda self: _FakeClient())
+    c = LLMClient(LLMConfig(mock=False, frequency_penalty=0.4, presence_penalty=0.25))
+    list(c.stream_complete([{"role": "user", "content": "hi"}]))
+    assert captured.get("frequency_penalty") == 0.4
+    assert captured.get("presence_penalty") == 0.25
+    assert captured.get("stream") is True
+
+
+def test_health_mock_does_not_pollute_observability(monkeypatch):
+    """R2 验证：mock 模式下 health() 不触网，也不改写真实问答的可观测字段。"""
+    client = LLMClient(LLMConfig(mock=True))
+    client.last_usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    client.last_attempts = 2
+    client.last_error = "boom"
+    health = client.health()
+    assert health["ok"] is True
+    assert client.last_usage == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    assert client.last_attempts == 2
+    assert client.last_error == "boom"
+
+
+def test_health_real_restores_observable_state(monkeypatch):
+    """R2 验证：真实探针会改写 last_* 字段，但 health() 必须在返回前还原为探针前的值。"""
+    client = LLMClient(LLMConfig(mock=False))
+    # 预置一次真实问答后的可观测字段
+    client.last_usage = {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}
+    client.last_attempts = 1
+    client.last_error = None
+
+    def fake_complete(self, messages, context_files=None, system_prompt=None):
+        self.last_usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        self.last_attempts = 3
+        self.last_error = "probe-failed"
+        return "OK"
+
+    monkeypatch.setattr(client, "complete", fake_complete)
+    health = client.health()
+    assert health["ok"] is True
+    # 探针后的可观测字段必须还原为真实问答的值，而非被探针覆盖
+    assert client.last_usage == {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}
+    assert client.last_attempts == 1
+    assert client.last_error is None

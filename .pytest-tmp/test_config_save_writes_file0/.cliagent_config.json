@@ -1,0 +1,5 @@
+{
+  "model": "m1",
+  "base_url": "http://b",
+  "api_key": "ollama"
+}

@@ -29,6 +29,8 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_TOKENS = 1024
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_TOP_P = 1.0              # nucleus 采样阈值（1.0 = 关闭，等价于贪心）
+DEFAULT_FREQUENCY_PENALTY = 0.0  # 频率惩罚（抑制重复词，0 = 关闭）
+DEFAULT_PRESENCE_PENALTY = 0.0   # 存在惩罚（鼓励新话题，0 = 关闭）
 DEFAULT_RETRIES = 1           # 瞬态错误的重试次数（不含首次）
 DEFAULT_BACKOFF = 0.2         # 指数退避基延迟（秒）
 DEFAULT_MAX_CONTEXT_TOKENS = 12000  # 发送给模型的历史 token 预算上限（防上下文溢出）
@@ -79,6 +81,8 @@ class LLMConfig:
     max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))))
     temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", str(DEFAULT_TEMPERATURE))))
     top_p: float = field(default_factory=lambda: float(os.getenv("LLM_TOP_P", str(DEFAULT_TOP_P))))
+    frequency_penalty: float = field(default_factory=lambda: float(os.getenv("LLM_FREQUENCY_PENALTY", str(DEFAULT_FREQUENCY_PENALTY))))
+    presence_penalty: float = field(default_factory=lambda: float(os.getenv("LLM_PRESENCE_PENALTY", str(DEFAULT_PRESENCE_PENALTY))))
     retries: int = field(default_factory=lambda: int(os.getenv("LLM_RETRIES", str(DEFAULT_RETRIES))))
     backoff: float = field(default_factory=lambda: float(os.getenv("LLM_BACKOFF", str(DEFAULT_BACKOFF))))
     max_context_tokens: int = field(
@@ -222,9 +226,7 @@ class LLMClient:
                 resp = client.chat.completions.create(
                     model=self.config.model,
                     messages=full,
-                    temperature=self.config.temperature,
-                    max_tokens=self.config.max_tokens,
-                    top_p=self.config.top_p,
+                    **self._build_sampling_params(),
                 )
             except Exception as exc:  # 隐性问题：网络/限流/鉴权错误需被捕获并包装
                 last_exc = exc
@@ -288,28 +290,70 @@ class LLMClient:
         # 避免超大历史触发模型上下文溢出。
         full, _trimmed = LLMClient.trim_messages_to_budget(full, self.config.max_context_tokens)
         client = self._get_client()
+        # R1/R2 修复（隐性韧性不一致）：原 stream_complete 在建立流时若遇
+        # 网络抖动/限流/5xx，会直接抛错让「边生成边显示」中断；而 complete
+        # 早已具备「瞬态错误重试 + 指数退避」。这里把流式路径补齐到同一套
+        # 重试逻辑——仅对 create（建流）阶段的瞬态错误重试；一旦流已开始产出
+        # 数据则不再重试（避免重复吐字）。重试耗尽或非瞬态错误统一包装为 LLMError。
+        last_exc: Optional[Exception] = None
+        max_attempts = max(1, self.config.retries + 1)
+        attempts = 0
+        stream = None
+        while attempts < max_attempts:
+            attempts += 1
+            try:
+                stream = client.chat.completions.create(
+                    model=self.config.model,
+                    messages=full,
+                    stream=True,
+                    **self._build_sampling_params(),
+                )
+                self.last_attempts = attempts
+                self.last_error = None
+                break
+            except Exception as exc:  # 建流失败：判定是否可重试
+                last_exc = exc
+                self.last_attempts = attempts
+                self.last_error = str(exc)
+                if attempts >= max_attempts or not self._is_transient(exc):
+                    break
+                time.sleep(self.config.backoff * (2 ** (attempts - 1)))
+                continue
+        if stream is None:  # 重试耗尽或全部非瞬态
+            retried = attempts - 1
+            suffix = f"（已重试 {retried} 次）" if retried > 0 else ""
+            raise LLMError(f"LLM 流式调用失败{suffix}：{last_exc}") from last_exc
         try:
-            stream = client.chat.completions.create(
-                model=self.config.model,
-                messages=full,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-                top_p=self.config.top_p,
-                stream=True,
-            )
             for chunk in stream:
                 if not chunk.choices:
                     continue
                 piece = chunk.choices[0].delta.content or ""
                 if piece:
                     yield piece
-        except Exception as exc:  # 流式失败也统一包装
+        except Exception as exc:  # 流中途失败也统一包装
             raise LLMError(f"LLM 流式调用失败：{exc}") from exc
 
     @staticmethod
     def _is_transient(exc: Exception) -> bool:
         """判定异常是否为可重试的瞬态错误（网络抖动 / 限流 / 5xx）。"""
         return any(k in str(exc).lower() for k in _TRANSIENT_KEYWORDS)
+
+    def _build_sampling_params(self) -> dict:
+        """构造统一的采样参数 dict，供 complete / stream_complete 共用。
+
+        R2/R3（一致性 + DRY）：原先 top_p/temperature/max_tokens 由两条生成
+        链各自拼 kwargs，极易出现「一处新增参数、另一处漏加」的分叉（c112 的
+        regenerate 就曾与 chat 参数脱节）。集中到一个构造器，保证口径永远一致；
+        None 值不发送，便于「不配置即走模型默认」。
+        """
+        params = {
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+            "top_p": self.config.top_p,
+            "frequency_penalty": self.config.frequency_penalty,
+            "presence_penalty": self.config.presence_penalty,
+        }
+        return {k: v for k, v in params.items() if v is not None}
 
     def answer(
         self,
@@ -363,6 +407,12 @@ class LLMClient:
         """
         if self.config.mock:
             return {"ok": True, "mock": True, "model": self.config.model, "attempts": 0, "error": None}
+        # R2 修复（隐性可观测性污染）：health() 内部复用 complete() 探测，而
+        # complete() 会覆写 last_usage / last_attempts / last_error 三个可观测字段。
+        # 若用户在「一次真实 ask」之后调用 `config --check`（触发 health），探针结果
+        # 会覆盖真实答案的统计，导致下游读取到错误的 token 用量/尝试次数。这里在
+        # 探测前快照、探测后还原，保证 health() 不影响调用方对真实问答的可观测性。
+        snap = (self.last_usage, self.last_attempts, self.last_error)
         try:
             resp = self.complete(
                 [{"role": "user", "content": "ping"}],
@@ -383,6 +433,8 @@ class LLMClient:
                 "attempts": self.last_attempts,
                 "error": str(exc),
             }
+        finally:
+            self.last_usage, self.last_attempts, self.last_error = snap
 
     def list_models(self) -> List[str]:
         """列出端点可用的模型 id（R1 新能力，供 CLI `models` 命令 / 前端模型下拉复用）。

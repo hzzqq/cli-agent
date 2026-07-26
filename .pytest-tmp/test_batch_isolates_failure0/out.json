@@ -1,0 +1,12 @@
+[
+  {
+    "question": "坏问题",
+    "answer": null,
+    "error": "LLM 调用失败"
+  },
+  {
+    "question": "好问题",
+    "answer": null,
+    "error": "LLM 调用失败"
+  }
+]
