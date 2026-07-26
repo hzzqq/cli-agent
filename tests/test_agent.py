@@ -1128,6 +1128,25 @@ def test_batch_isolates_failure(monkeypatch, tmp_path):
     assert data[1]["answer"] == "模拟答案"
 
 
+def test_batch_writes_jsonl(monkeypatch, tmp_path):
+    """R1 新需求验证：--out-format jsonl 写出每行一条 JSON。"""
+    monkeypatch.setattr(agent, "_require_index", lambda root=".": True)
+    monkeypatch.setattr(agent, "build_context", lambda *a, **k: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent, "LLMClient", _FakeClient)
+    qfile = tmp_path / "q.txt"
+    qfile.write_text("问题一\n问题二\n", encoding="utf-8")
+    out = tmp_path / "out.jsonl"
+    r = runner.invoke(agent.app, ["batch", "--file", str(qfile), "--out", str(out),
+                                  "--out-format", "jsonl"])
+    assert r.exit_code == 0
+    lines = [ln for ln in out.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 2
+    # 每行都是合法 JSON 且含 question/answer 字段
+    for ln in lines:
+        obj = _json.loads(ln)
+        assert "question" in obj and "answer" in obj
+
+
 def test_batch_empty_input(tmp_path):
     """非法护栏：未提供任何问题时退出码 1 且不崩溃。"""
     r = runner.invoke(agent.app, ["batch"])

@@ -341,6 +341,7 @@ def _do_ask(
     stream: bool = True,
     explain: bool = False,
     index_path: "str | None" = None,
+    client: "LLMClient | None" = None,
 ):
     # 隐性问题：--no-context 下不应再强制检索，否则会为「纯通用问题」无谓加载索引
     if no_context:
@@ -372,7 +373,9 @@ def _do_ask(
                                      index_path=index_path):
             terms = "、".join(hit["terms"]) or "（无显式关键词匹配）"
             typer.echo(f"  {hit['score']:.2f}　{hit['path']}　命中词：{terms}")
-    client = LLMClient(config)
+    # 复用调用方传入的 client（批量场景复用单例，避免每条问题重建），否则按需新建
+    if client is None:
+        client = LLMClient(config)
     # 多轮时把历史 + 当前问题（含检索上下文）组装成 messages 传给 complete，
     # 使 chat 真正具备「多轮记忆」，而非每轮只看当前问题（隐性正确性缺陷）。
     user_content = (
@@ -570,7 +573,7 @@ def batch(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="打印每条问题的检索概况"),
     max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符）"),
     out_path: Optional[str] = typer.Option(None, "--out", help="把批量问答写入文件（配合 --out-format）"),
-    out_format: str = typer.Option("md", "--out-format", help="批量输出格式：md 或 json"),
+    out_format: str = typer.Option("md", "--out-format", help="批量输出格式：md / json / jsonl"),
     root: str = typer.Option(".", "--root", help="索引文件所在目录，默认当前目录"),
 ):
     """批量问答：从清单文件或标准输入读取多行问题，逐条基于索引作答。
@@ -603,6 +606,8 @@ def batch(
     )
     sp = _resolve_system_prompt(system_prompt, system_prompt_file)
     index_path = os.path.join(root, INDEX_FILE)
+    # R2 性能：整个批量复用单个 LLMClient，避免每条问题重复实例化（重 SDK 下尤甚）
+    client = LLMClient(cfg)
     results = []
     failed = 0
     for i, q in enumerate(questions, 1):
@@ -613,7 +618,7 @@ def batch(
                 q, top_k, config=cfg, as_json=False, min_score=min_score,
                 system_prompt=sp, no_context=no_context, verbose=verbose,
                 max_context_chars=max_context_chars, stream=False,
-                explain=False, index_path=index_path,
+                explain=False, index_path=index_path, client=client,
             )
             results.append({"question": q, "answer": ans, "error": None})
         except typer.Exit:
@@ -629,6 +634,10 @@ def batch(
                 Path(out_path).write_text(
                     _json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
+            elif out_format == "jsonl":
+                # R1 新能力：每行一条 JSON，便于 grep/jq/流式消费
+                lines = [_json.dumps(r, ensure_ascii=False) for r in results]
+                Path(out_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
             else:
                 blocks = []
                 for r in results:

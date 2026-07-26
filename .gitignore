@@ -2,3 +2,6 @@ __pycache__/
 *.py[cod]
 .env
 .cliagent_index.json
+
+# pytest 临时目录（verify_all.py 固定 basetemp）
+.pytest_tmp/

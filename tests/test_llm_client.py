@@ -539,10 +539,11 @@ def test_health_real_restores_observable_state(monkeypatch):
     client.last_attempts = 1
     client.last_error = None
 
-    def fake_complete(self, messages, context_files=None, system_prompt=None):
-        self.last_usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-        self.last_attempts = 3
-        self.last_error = "probe-failed"
+    def fake_complete(messages, context_files=None, system_prompt=None):
+        # 注意：被 monkeypatch 成实例属性后调用时不会再传入 self
+        client.last_usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        client.last_attempts = 3
+        client.last_error = "probe-failed"
         return "OK"
 
     monkeypatch.setattr(client, "complete", fake_complete)
