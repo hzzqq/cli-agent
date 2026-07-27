@@ -553,3 +553,86 @@ def test_health_real_restores_observable_state(monkeypatch):
     assert client.last_usage == {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}
     assert client.last_attempts == 1
     assert client.last_error is None
+
+
+def test_format_usage_empty():
+    # usage 缺失返回空串，调用方据此跳过展示（不污染答案）
+    from llm_client import format_usage
+
+    assert format_usage(None) == ""
+    assert format_usage({}) == ""
+    # 全 0 的用量是合法值（接口返回了但恰好为 0），不应被当作缺失而吞掉
+    assert format_usage({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}) == "token 总 0（提示 0 / 补全 0）"
+
+
+def test_format_usage_basic():
+    from llm_client import format_usage
+
+    line = format_usage(
+        {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        model="gpt-4o",
+    )
+    assert "token 总 15" in line
+    assert "提示 10" in line
+    assert "补全 5" in line
+    assert "模型 gpt-4o" in line
+
+
+def test_format_usage_cost_estimate():
+    from llm_client import format_usage
+
+    line = format_usage(
+        {"prompt_tokens": 1000, "completion_tokens": 2000, "total_tokens": 3000},
+        price_prompt=0.01, price_completion=0.03,
+    )
+    # 1000*0.01/1000 + 2000*0.03/1000 = 0.01 + 0.06 = 0.07
+    assert "$0.0700" in line
+
+
+def test_stream_complete_captures_usage(monkeypatch):
+    # R2 修复验证：真实流式路径（mock=False）应捕获尾部块 token 用量，
+    # 此前流式（ask/chat 默认）下 last_usage 恒为 None，用量完全不可见。
+    from llm_client import LLMClient, LLMConfig
+
+    class _Usage:
+        prompt_tokens = 3
+        completion_tokens = 2
+        total_tokens = 5
+
+    class _Chunk:
+        def __init__(self, content=None, usage=None):
+            self.choices = (
+                [type("_C", (), {"delta": type("_D", (), {"content": content})()})()]
+                if content is not None else []
+            )
+            self.usage = usage
+
+    class _Stream:
+        def __init__(self):
+            self._n = 0
+        def __iter__(self):
+            return self
+        def __next__(self):
+            self._n += 1
+            if self._n == 1:
+                return _Chunk(content="你好")
+            if self._n == 2:
+                return _Chunk(usage=_Usage())
+            raise StopIteration
+
+    class _Completions:
+        def create(self, **kwargs):
+            return _Stream()
+    class _Chat:
+        def __init__(self):
+            self.completions = _Completions()
+    class _FakeClient:
+        def __init__(self):
+            self.chat = _Chat()
+
+    cfg = LLMConfig(mock=False, model="m", base_url="http://x", api_key="k")
+    client = LLMClient(cfg)
+    monkeypatch.setattr(client, "_get_client", lambda: _FakeClient())
+    out = "".join(client.stream_complete([{"role": "user", "content": "hi"}]))
+    assert out == "你好"
+    assert client.last_usage == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}

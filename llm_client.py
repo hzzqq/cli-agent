@@ -35,6 +35,30 @@ DEFAULT_RETRIES = 1           # 瞬态错误的重试次数（不含首次）
 DEFAULT_BACKOFF = 0.2         # 指数退避基延迟（秒）
 DEFAULT_MAX_CONTEXT_TOKENS = 12000  # 发送给模型的历史 token 预算上限（防上下文溢出）
 
+
+def format_usage(usage: "Optional[dict]", model: "str | None" = None,
+                 price_prompt: "float | None" = None,
+                 price_completion: "float | None" = None) -> str:
+    """把 token 用量格式化为一行可读摘要（供 CLI 把真实消耗呈现给用户）。
+
+    纯函数、可单测。usage 缺省（如接口未返回用量）时返回空串，调用方据此跳过。
+    传入 price_prompt / price_completion（每 1k token 价格）时额外给出成本估算，
+    便于成本管控（模型定价各异，未提供则不显示金额）。
+    """
+    if not usage:
+        return ""
+    pt = int(usage.get("prompt_tokens", 0) or 0)
+    ct = int(usage.get("completion_tokens", 0) or 0)
+    tot = int(usage.get("total_tokens", 0) or (pt + ct))
+    parts = [f"token 总 {tot}（提示 {pt} / 补全 {ct}）"]
+    if model:
+        parts.append(f"模型 {model}")
+    if price_prompt is not None or price_completion is not None:
+        cost = (pt / 1000.0) * (price_prompt or 0.0) + (ct / 1000.0) * (price_completion or 0.0)
+        parts.append(f"≈ ${cost:.4f}")
+    return " · ".join(parts)
+
+
 # 默认系统提示（R2 修复重复 system 块时复用，避免多处硬编码同一字符串）
 DEFAULT_SYSTEM_PROMPT = (
     "你是一个帮助理解代码仓库的助手。请基于下面提供的仓库上下文片段，"
@@ -306,6 +330,7 @@ class LLMClient:
                     model=self.config.model,
                     messages=full,
                     stream=True,
+                    stream_options={"include_usage": True},
                     **self._build_sampling_params(),
                 )
                 self.last_attempts = attempts
@@ -325,6 +350,17 @@ class LLMClient:
             raise LLMError(f"LLM 流式调用失败{suffix}：{last_exc}") from last_exc
         try:
             for chunk in stream:
+                # R2 修复（隐性可观测性缺口）：流式路径此前不捕获 token 用量，
+                # 导致 last_usage 在流式（ask/chat 默认）下恒为 None，用量/成本
+                # 完全不可见。OpenAI 兼容流在尾部块（choices 为空）携带 usage，
+                # 这里显式捕获并归一化为与 complete 一致的字段口径。
+                usage = getattr(chunk, "usage", None)
+                if usage is not None:
+                    self.last_usage = {
+                        "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+                        "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+                        "total_tokens": getattr(usage, "total_tokens", 0) or 0,
+                    }
                 if not chunk.choices:
                     continue
                 piece = chunk.choices[0].delta.content or ""

@@ -429,6 +429,40 @@ def test_ask_save_writes_answer_file(monkeypatch, tmp_path):
     assert out.read_text(encoding="utf-8") == "这是答案"
 
 
+def test_ask_shows_usage_with_price(monkeypatch):
+    """R1 新需求验证：ask 默认打印真实 token 用量；传单价则附成本估算。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    r = runner.invoke(
+        agent.app,
+        ["ask", "问题", "--no-context", "--price-prompt", "0.001", "--price-completion", "0.002"],
+    )
+    assert r.exit_code == 0
+    out = r.stdout + r.stderr
+    assert "token 总" in out
+    assert "$" in out  # 成本估算已呈现
+
+
+def test_ask_no_show_usage_suppresses(monkeypatch):
+    """R1 新需求验证：--no-show-usage 关闭用量行（兼容 --json / 静默脚本）。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    r = runner.invoke(agent.app, ["ask", "问题", "--no-context", "--no-show-usage"])
+    assert r.exit_code == 0
+    out = r.stdout + r.stderr
+    assert "token 总" not in out
+
+
+def test_ask_usage_skipped_for_json(monkeypatch):
+    """R1 新需求验证：--json 输出不受用量行污染（诊断走 stderr 也不入 JSON）。"""
+    monkeypatch.setenv("MOCK_LLM", "1")
+    r = runner.invoke(agent.app, ["ask", "问题", "--no-context", "--json", "--show-usage"])
+    assert r.exit_code == 0
+    try:
+        _json.loads(r.stdout)
+    except Exception:
+        assert False, "用量行污染了 --json 输出"
+    assert "token 总" not in r.stdout  # JSON 纯净
+
+
 def test_config_command_shows_effective_settings(monkeypatch):
     """R1 新需求验证：config 命令展示生效的 LLM 配置。"""
     monkeypatch.setenv("MOCK_LLM", "1")

@@ -26,6 +26,7 @@ import typer
 
 from index_store import build_index, save_index, load_index, INDEX_FILE
 from retriever import build_context
+import llm_client
 from llm_client import LLMClient, LLMConfig, LLMError
 from log_utils import setup_logging
 
@@ -337,6 +338,9 @@ def _do_ask(
     no_context: bool = False,
     save_path: Optional[str] = None,
     verbose: bool = False,
+    show_usage: bool = True,
+    price_prompt: Optional[float] = None,
+    price_completion: Optional[float] = None,
     max_context_chars: int = 6000,
     stream: bool = True,
     explain: bool = False,
@@ -413,6 +417,21 @@ def _do_ask(
                 typer.echo(f"  - {p}")
         elif no_context:
             typer.echo("\nℹ️  未使用仓库上下文（--no-context）")
+    # R1 新能力：把真实 token 用量/成本呈现给用户（流式路径现已正确记录用量，
+    # 此前流式下 last_usage 恒为空、完全不可见）。诊断信息走 stderr，不污染答案
+    # 与 --json 输出。--no-show-usage 可关闭；传 --price-prompt/--price-completion
+    # 则额外给出成本估算（$/1k token）。
+    if show_usage and not as_json:
+        # 防御性取值：部分（mock/测试注入的）client 可能不含 last_usage 字段，
+        # 缺失时 format_usage 返回空串、跳过展示，而不是令整轮问答崩溃。
+        usage_line = llm_client.format_usage(
+            getattr(client, "last_usage", None),
+            model=config.model if config else None,
+            price_prompt=price_prompt,
+            price_completion=price_completion,
+        )
+        if usage_line:
+            typer.echo(f"📊 {usage_line}", err=True)
     # R1 新能力：把答案落盘，便于脚本化消费与归档
     if save_path:
         try:
@@ -518,6 +537,9 @@ def ask(
     question_file: Optional[str] = typer.Option(None, "--file", help="从文件读取问题（支持长/多行问题，优先于位置参数与管道）"),
     save_path: Optional[str] = typer.Option(None, "--save", help="把答案写入指定文件（便于脚本化消费/归档）"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="打印检索概况（命中文件数 / 上下文字符数 / 估算 token）"),
+    show_usage: bool = typer.Option(True, "--show-usage/--no-show-usage", help="完成后打印真实 token 用量（默认开）"),
+    price_prompt: Optional[float] = typer.Option(None, "--price-prompt", help="提示 token 单价（$/1k），用于成本估算"),
+    price_completion: Optional[float] = typer.Option(None, "--price-completion", help="补全 token 单价（$/1k），用于成本估算"),
         max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符），超出后停止追加更低相关文件"),
         no_stream: bool = typer.Option(False, "--no-stream", help="关闭流式输出，等生成完毕后一次性打印（兼容管道/脚本）"),
         explain: bool = typer.Option(False, "--explain", "-e", help="打印检索解释（命中文件+相关度+命中词），便于排查召回质量"),
@@ -548,6 +570,7 @@ def ask(
     _do_ask(
         question, top_k, config=cfg, as_json=as_json, min_score=min_score,
         system_prompt=sp, no_context=no_context, save_path=save_path, verbose=verbose,
+        show_usage=show_usage, price_prompt=price_prompt, price_completion=price_completion,
         max_context_chars=max_context_chars, stream=not no_stream,
         explain=explain, index_path=index_path,
     )
@@ -1179,6 +1202,9 @@ def chat(
     system_prompt_file: Optional[str] = typer.Option(None, "--system-prompt-file", help="从文件读取系统提示（优先于 --system-prompt）"),
     no_context: bool = typer.Option(False, "--no-context", help="跳过仓库检索，每轮直接把问题交给 LLM（纯通用对话）"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="打印检索概况（命中文件数 / 上下文字符数 / 估算 token）"),
+    show_usage: bool = typer.Option(True, "--show-usage/--no-show-usage", help="每轮完成后打印真实 token 用量（默认开）"),
+    price_prompt: Optional[float] = typer.Option(None, "--price-prompt", help="提示 token 单价（$/1k），用于成本估算"),
+    price_completion: Optional[float] = typer.Option(None, "--price-completion", help="补全 token 单价（$/1k），用于成本估算"),
         max_context_chars: int = typer.Option(6000, "--max-context-chars", help="上下文预算上限（字符），超出后停止追加更低相关文件"),
         no_stream: bool = typer.Option(False, "--no-stream", help="关闭流式输出，等生成完毕后一次性打印"),
         explain: bool = typer.Option(False, "--explain", "-e", help="每轮打印检索解释（命中文件+相关度+命中词）"),
@@ -1216,7 +1242,7 @@ def chat(
             if save_file:
                 _save_transcript(save_file, history)
             break
-        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context, verbose=verbose, max_context_chars=max_context_chars, stream=not no_stream, explain=explain, index_path=index_path)
+        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context, verbose=verbose, show_usage=show_usage, price_prompt=price_prompt, price_completion=price_completion, max_context_chars=max_context_chars, stream=not no_stream, explain=explain, index_path=index_path)
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": answer})
         if session_file:
