@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -124,6 +125,32 @@ def test_build_index_incremental_reuses_unchanged(tmp_path, monkeypatch):
     assert len(e3) == 1
     assert e3[0].snippet != old_snippet
     assert "VERSION = 2" in e3[0].snippet
+
+
+def test_incremental_reuse_still_applies_size_filters(tmp_path):
+    """R2 回归：增量复用旧条目时仍须应用 --max-size/--min-size。
+
+    旧实现里未变更文件（mtime/size 一致）会被原样带回，导致本轮新加的尺寸过滤
+    对存量文件形同虚设——用户以为收紧了过滤，实际索引里仍留着超大/极小文件。
+    """
+    (tmp_path / "tiny.py").write_text("x=1")            # 3 字节
+    (tmp_path / "big.py").write_text("y=2" * 400)       # 1200 字节
+
+    e1, skipped1 = build_index(str(tmp_path))
+    assert len(e1) == 2 and skipped1 == []
+
+    names = lambda es: sorted(os.path.basename(e.path) for e in es)
+    skips = lambda ss: sorted((os.path.basename(s["path"]), s["reason"]) for s in ss)
+
+    # 文件未变更，但本轮加了上限：超大文件必须被剔除并计入 skipped
+    e2, skipped2 = build_index(str(tmp_path), prev=e1, max_size=100)
+    assert names(e2) == ["tiny.py"]
+    assert skips(skipped2) == [("big.py", "too_large")]
+
+    # 同理，本轮加了下限：极小文件必须被剔除
+    e3, skipped3 = build_index(str(tmp_path), prev=e1, min_size=100)
+    assert names(e3) == ["big.py"]
+    assert skips(skipped3) == [("tiny.py", "too_small")]
 
 
 def test_index_command_incremental_flag(tmp_path):

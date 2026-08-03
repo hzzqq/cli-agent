@@ -146,6 +146,18 @@ def build_index(
         # 增量模式：未变更的文件直接复用旧条目，跳过 I/O
         old = prev_by_path.get(path)
         if old is not None and old.mtime == mtime and old.size == size:
+            # R2 修复（隐性过滤失效）：增量复用必须重新应用 --min-size/--max-size。
+            # 否则在新一轮加了更严格的尺寸过滤、但文件本身未变（mtime/size 未变）
+            # 时，旧条目会被「原样带回」，导致 --min-size/--max-size 对已索引的存量
+            # 文件形同虚设（用户期望更严格的尺寸过滤能即时生效）。命中则按对应原因
+            # 归入 skipped，与全新抓取路径口径一致。
+            if (max_size is not None and size > max_size) or (min_size is not None and size < min_size):
+                skipped.append({
+                    "path": path,
+                    "reason": "too_large" if (max_size is not None and size > max_size) else "too_small",
+                    "size": size,
+                })
+                continue
             entries.append(old)
             continue
         snippet = _read_snippet(path)
