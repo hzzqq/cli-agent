@@ -19,6 +19,10 @@ from typing import Dict, List
 
 
 INDEX_FILE = ".cliagent_index.json"
+# 自身持久化配置（agent.py 亦从本模块导入，保证单一来源）
+CONFIG_FILE = ".cliagent_config.json"
+# 建索引时必须排除的自身产物（R2 修复，见 build_index 内说明）
+SELF_ARTIFACTS = {INDEX_FILE, CONFIG_FILE}
 
 # 视为文本、参与索引的扩展名
 TEXT_EXTS = {
@@ -96,7 +100,7 @@ def build_index(
         匹配的文件跳过且不进入索引（R1 新能力，补充固定 SKIP_DIRS 之外的临时忽略需求）。
 
     返回的 skipped 为 [{path, reason, ...}]，reason ∈
-    {"unsupported_ext", "ext_filter", "too_large", "too_small", "unreadable", "excluded"}，
+    {"unsupported_ext", "ext_filter", "too_large", "too_small", "unreadable", "excluded", "self_artifact"}，
     便于 CLI 向用户公示「哪些文件没被索引」以提升可观测性。
     """
     # R2 修复（隐性可用性缺陷）：用户若写 `--ext py`（无点），exts 会是 {"py"}，
@@ -114,6 +118,13 @@ def build_index(
     skipped: List[dict] = []
     for path in _iter_files(root):
         ext = os.path.splitext(path)[1].lower()
+        # R2 修复（秘密泄露）：自身产物必须排除——.cliagent_config.json 可能含
+        # 明文 api_key，被索引后其内容进入 snippet，ask 时随上下文整段发给 LLM
+        # 端点、search 也会直接回显密钥；.cliagent_index.json 是索引自身，自索引
+        # 会让 snippet 在索引里翻倍膨胀。在扩展名/尺寸过滤之前短路。
+        if os.path.basename(path) in SELF_ARTIFACTS:
+            skipped.append({"path": path, "reason": "self_artifact"})
+            continue
         # R1 新能力：用户自定义忽略模式（在扩展名判断之前生效，优先级高于类型匹配）
         if exclude:
             rel = os.path.relpath(path, root)
@@ -171,8 +182,22 @@ def save_index(entries: List[IndexEntry], root: str = ".") -> str:
         "indexed_at": _dt.datetime.now().isoformat(),
         "files": [asdict(e) for e in entries],
     }
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    # R2 修复（数据丢失）：原实现 open("w") 先截断旧文件再写，进程在 dump
+    # 中途崩溃/断电/磁盘满会把「唯一的索引文件」毁成半截 JSON，load_index
+    # 解析失败静默返回 []，ask 全废。现先写临时文件、成功后 os.replace
+    # 原子替换：任一时刻磁盘上的索引要么是完整旧版、要么是完整新版。
+    tmp_path = out_path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, out_path)
+    except BaseException:
+        # 写入失败时清理残留临时文件，保留旧索引完好
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
     return out_path
 
 

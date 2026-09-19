@@ -1186,3 +1186,83 @@ def test_batch_empty_input(tmp_path):
     r = runner.invoke(agent.app, ["batch"])
     assert r.exit_code == 1
     assert "未提供任何问题" in (r.stderr or r.stdout)
+
+
+class _StreamFakeClient:
+    """供流式 ask 测试：stream_complete 逐段产出固定答案。"""
+
+    def __init__(self, config=None):
+        pass
+
+    def stream_complete(self, messages, context_files=None, system_prompt=None):
+        yield "第一段"
+        yield "第二段"
+
+
+def test_ask_stream_prints_answer_once(monkeypatch):
+    """R2 修复验证：流式答案不得打印两遍。
+
+    修复前 ask 先逐字打印（stream_complete），收尾又整体 echo(answer)，
+    答案完整出现两遍；现仅非流式路径整体打印。
+    """
+    monkeypatch.setattr(agent, "_require_index", lambda root=".": True)
+    monkeypatch.setattr(agent, "build_context", lambda *a, **k: ("ctx", ["a.py"]))
+    monkeypatch.setattr(agent, "LLMClient", _StreamFakeClient)
+    r = runner.invoke(agent.app, ["ask", "问题"])
+    assert r.exit_code == 0
+    # 修复前 stdout 为 "第一段第二段\n第一段第二段\n..."（每段出现 2 次）
+    assert r.stdout.count("第一段") == 1
+    assert r.stdout.count("第二段") == 1
+
+
+def test_chat_survives_llm_failure(monkeypatch, tmp_path):
+    """R2 会话健壮性验证：单轮 LLM 失败不得把整个 chat 会话带崩。
+
+    修复前 _do_ask 抛 typer.Exit 直接穿透退出 chat，已累积的历史随进程
+    消失；现捕获后保存既有轮次并继续下一轮。
+    """
+    calls = {"n": 0}
+
+    class _FailFirst:
+        def __init__(self, config=None):
+            pass
+
+        def stream_complete(self, messages, context_files=None, system_prompt=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise agent.LLMError("网络抖动")
+            yield "第二轮答案"
+
+    sess = tmp_path / "hist.json"
+    monkeypatch.setattr(agent, "_require_index", lambda root=".": True)
+    monkeypatch.setattr(agent, "LLMClient", _FailFirst)
+    r = runner.invoke(
+        agent.app, ["chat", "--session", str(sess), "--no-context"],
+        input="第一轮\n第二轮\nexit\n",
+    )
+    assert r.exit_code == 0
+    assert calls["n"] == 2  # 第二轮仍被处理（会话未中断）
+    assert "第二轮答案" in r.stdout
+    # 失败轮不得污染历史；成功轮完整落盘
+    import json as _json
+    hist = _json.loads(sess.read_text(encoding="utf-8"))
+    roles = [m["role"] for m in hist]
+    assert roles == ["user", "assistant"]
+    assert hist[0]["content"] == "第二轮"
+    assert hist[1]["content"] == "第二轮答案"
+
+
+def test_index_health_empty_index_not_corrupt(tmp_path):
+    """R2 误诊修复验证：合法空索引（目录里无可索引文本文件，files=[]）
+    应报 ok，而非 corrupt（此前误导用户反复重建索引）。"""
+    (tmp_path / ".cliagent_index.json").write_text('{"files": []}', encoding="utf-8")
+    status, detail = agent._index_health(str(tmp_path))
+    assert status == "ok"
+    assert "0 个文件" in detail
+    # 真损坏（无法解析）仍报 corrupt
+    (tmp_path / ".cliagent_index.json").write_text("{ broken json", encoding="utf-8")
+    status2, _ = agent._index_health(str(tmp_path))
+    assert status2 == "corrupt"
+    # 不存在仍报 missing
+    status3, _ = agent._index_health(str(tmp_path / "nope"))
+    assert status3 == "missing"

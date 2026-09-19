@@ -341,3 +341,43 @@ def test_clear_index_respects_root(tmp_path):
     # cwd 的索引文件应仍保留（未被误清）
     assert (Path(".cliagent_index.json")).exists()
     clear_index(".")  # 清理本测试在 cwd 留下的索引，避免污染
+
+
+def test_build_index_excludes_self_artifacts(tmp_path):
+    """R2 秘密泄露验证：.cliagent_config.json（可含明文 api_key）与
+    .cliagent_index.json 不得被索引进 snippet（否则 ask 时密钥随上下文
+    整段发给 LLM 端点、search 直接回显）。"""
+    (tmp_path / ".cliagent_config.json").write_text(
+        '{"api_key": "sk-secret-123"}', encoding="utf-8")
+    (tmp_path / ".cliagent_index.json").write_text('{"files": []}', encoding="utf-8")
+    (tmp_path / "code.py").write_text("print('hi')", encoding="utf-8")
+    entries, skipped = build_index(str(tmp_path))
+    paths = [e.path for e in entries]
+    assert all(not p.endswith(".cliagent_config.json") for p in paths)
+    assert all(not p.endswith(".cliagent_index.json") for p in paths)
+    assert any(r["reason"] == "self_artifact" for r in skipped)
+    assert any(e.path.endswith("code.py") for e in entries)  # 正常文件不受影响
+    assert all("sk-secret-123" not in e.snippet for e in entries)
+
+
+def test_save_index_atomic_keeps_old_on_failure(tmp_path, monkeypatch):
+    """R2 数据丢失验证：写盘中途失败时旧索引必须完好（临时文件 + os.replace）。"""
+    import json as _json
+    import index_store as _is
+
+    old = IndexEntry(path="a.py", size=1, snippet="old", mtime=1.0)
+    save_index([old], str(tmp_path))
+    idx = tmp_path / ".cliagent_index.json"
+    assert idx.exists()
+
+    def _boom(obj, fp, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_is.json, "dump", _boom)
+    new = IndexEntry(path="b.py", size=2, snippet="new", mtime=2.0)
+    with pytest.raises(OSError):
+        save_index([new], str(tmp_path))
+    # 旧索引完好、无残留临时文件
+    loaded = _is.load_index(str(idx))
+    assert [e.path for e in loaded] == ["a.py"]
+    assert not (tmp_path / ".cliagent_index.json.tmp").exists()

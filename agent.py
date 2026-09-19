@@ -24,7 +24,7 @@ from typing import Optional
 
 import typer
 
-from index_store import build_index, save_index, load_index, INDEX_FILE
+from index_store import build_index, save_index, load_index, INDEX_FILE, CONFIG_FILE
 from retriever import build_context
 import llm_client
 from llm_client import LLMClient, LLMConfig, LLMError
@@ -35,8 +35,8 @@ log = logging.getLogger("cli_agent")
 # 版本号：随每次功能性迭代递增，便于用户/脚本识别 CLI 能力级别。
 VERSION = "1.0.0"
 
-# 持久化配置文件：保存常用 LLM 接入项，避免每次运行重复敲 --model/--base-url/--api-key
-CONFIG_FILE = ".cliagent_config.json"
+# 持久化配置文件名收敛到 index_store.CONFIG_FILE（单一来源；同时作为
+# build_index 的自身产物被排除，防止含 api_key 的配置被索引进上下文）
 # 允许写入/读取的配置文件键白名单（R2 类型安全：拒绝任意键，防配置注入）
 _CONFIG_KEYS = ("model", "base_url", "api_key")
 
@@ -139,6 +139,16 @@ def _index_health(root: str = ".") -> "tuple[str, str]":
     loaded = load_index(index_path) if root and root != "." else load_index()
     if not loaded:
         if os.path.exists(index_path):
+            # R2 修复（误诊）：合法空索引（目录里没有可索引的文本文件，
+            # files=[]）不是损坏——此前被误报 corrupt，误导用户反复重建。
+            # 解析成功且 files 是列表即视为健康（0 个文件）。
+            try:
+                with open(index_path, "r", encoding="utf-8") as f:
+                    data = _json.load(f)
+                if isinstance(data, dict) and isinstance(data.get("files"), list):
+                    return "ok", "索引正常（0 个文件）。"
+            except (OSError, _json.JSONDecodeError):
+                pass
             return "corrupt", (
                 f"索引文件（{INDEX_FILE}）存在但无法解析（可能已损坏）。"
             )
@@ -197,11 +207,26 @@ def _load_file_config(root: str = ".") -> dict:
 
 
 def _save_file_config(cfg: LLMConfig, root: str = ".") -> None:
-    """把生效的 LLM 配置写入持久化文件（仅白名单键）。"""
+    """把生效的 LLM 配置写入持久化文件（仅白名单键）。
+
+    R2 修复（数据丢失）：原实现 open("w") 先截断旧配置再写，中途失败
+    （磁盘满/崩溃）会把用户已保存的 api_key/model 等配置毁掉。现走
+    临时文件 + os.replace 原子替换，任一时刻配置文件要么完整旧版、
+    要么完整新版。
+    """
     data = {k: getattr(cfg, k) for k in _CONFIG_KEYS}
     path = os.path.join(root, CONFIG_FILE)
-    with open(path, "w", encoding="utf-8") as f:
-        _json.dump(data, f, ensure_ascii=False, indent=2)
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            _json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _unset_file_config(keys: "list[str]", root: str = ".") -> "list[str]":
@@ -410,7 +435,11 @@ def _do_ask(
         out = {"question": question, "answer": answer, "references": paths, "no_context": no_context}
         typer.echo(_json.dumps(out, ensure_ascii=False, indent=2))
     else:
-        typer.echo(answer)
+        # R2 修复（重复输出）：流式路径已在上面逐字打印完整 answer，这里
+        # 只在非流式时整体打印——原实现两种路径都打印，导致 ask/chat 的
+        # 答案完整出现两遍（流式逐字一遍 + 收尾整段一遍）。
+        if not do_stream:
+            typer.echo(answer)
         if paths:
             typer.echo("\n📚 参考文件：")
             for p in paths:
@@ -806,13 +835,22 @@ def save_session(path: "Optional[str]", history: "list[dict]") -> None:
     """
     if not path:
         return
+    tmp_path = path + ".tmp"
     try:
         parent = os.path.dirname(os.path.abspath(path))
         if parent and not os.path.isdir(parent):
             os.makedirs(parent, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        # R2 修复（数据丢失）：与 save_index/_save_file_config 同理改原子写——
+        # 原实现先截断再写，中途失败会把「上一轮已保存的历史」一起毁掉。
+        with open(tmp_path, "w", encoding="utf-8") as f:
             _json.dump(history, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
     except OSError as exc:
+        # 失败时清掉半截临时文件；旧会话文件原样保留
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         typer.echo(f"⚠️ 会话历史保存失败（{path}）：{exc}", err=True)
 
 
@@ -1242,7 +1280,17 @@ def chat(
             if save_file:
                 _save_transcript(save_file, history)
             break
-        answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context, verbose=verbose, show_usage=show_usage, price_prompt=price_prompt, price_completion=price_completion, max_context_chars=max_context_chars, stream=not no_stream, explain=explain, index_path=index_path)
+        # R2 修复（会话健壮性）：单轮 LLM 失败不应把整个交互会话带崩。
+        # _do_ask 失败时抛 typer.Exit（已向 stderr 打印具体错误），原实现
+        # 直接穿透退出 chat，已累积的多轮历史随进程一起消失。现捕获后
+        # 保存既有轮次并继续下一轮（与 batch 的逐条隔离一致）。
+        try:
+            answer = _do_ask(question, top_k, config=cfg, history=history, system_prompt=sp, no_context=no_context, verbose=verbose, show_usage=show_usage, price_prompt=price_prompt, price_completion=price_completion, max_context_chars=max_context_chars, stream=not no_stream, explain=explain, index_path=index_path)
+        except typer.Exit:
+            if session_file:
+                save_session(session_file, history)
+            typer.echo("⚠️ 本轮回答失败，会话已保存并继续（输入 exit 退出）。", err=True)
+            continue
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": answer})
         if session_file:
