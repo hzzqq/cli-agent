@@ -2,8 +2,14 @@
 from __future__ import annotations
 
 import logging
+import sys
+from pathlib import Path
 
-from log_utils import setup_logging, capture_logs
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from log_utils import setup_logging, capture_logs  # noqa: E402
 
 
 def test_setup_logging_default_level():
