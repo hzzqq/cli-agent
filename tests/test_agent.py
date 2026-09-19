@@ -1266,3 +1266,52 @@ def test_index_health_empty_index_not_corrupt(tmp_path):
     # 不存在仍报 missing
     status3, _ = agent._index_health(str(tmp_path / "nope"))
     assert status3 == "missing"
+
+
+def test_console_safe_output_replaces_unencodable_emoji():
+    """R2 修复验证（c165）：非 UTF-8 输出流下 emoji 降级为 ? 而非裸崩。
+
+    修复前：Windows 典型 cp936 控制台/重定向 + CLI emoji 输出直接
+    UnicodeEncodeError 裸栈（已实测复现）。main() 入口现统一
+    reconfigure(errors='replace')。
+    """
+    import io
+    import sys as _sys
+
+    import typer
+
+    raw_out = io.BytesIO()
+    raw_err = io.BytesIO()
+    old_out, old_err = _sys.stdout, _sys.stderr
+    _sys.stdout = io.TextIOWrapper(raw_out, encoding="gbk", errors="strict")
+    _sys.stderr = io.TextIOWrapper(raw_err, encoding="gbk", errors="strict")
+    try:
+        agent._make_output_console_safe()
+        typer.echo("🔍 emoji ok")            # 修复前：UnicodeEncodeError
+        typer.echo("⚠️ stderr ok", err=True)  # 修复前：UnicodeEncodeError
+    finally:
+        _sys.stdout, _sys.stderr = old_out, old_err
+    # TextIOWrapper 默认 newline=None 会把 \n 翻译成 \r\n（Windows），归一后比较
+    assert raw_out.getvalue().decode("gbk").replace("\r\n", "\n") == "? emoji ok\n"
+    # ⚠️ = U+26A0 + U+FE0F 两个码位，GBK 下各替换为一个 ?（共 ??），不抛异常即达标
+    err_text = raw_err.getvalue().decode("gbk").replace("\r\n", "\n")
+    prefix = err_text[: -len(" stderr ok\n")]
+    assert err_text.endswith(" stderr ok\n") and set(prefix) <= {"?"}
+
+
+def test_cli_survives_gbk_console_end_to_end(tmp_path, monkeypatch):
+    """端到端验证：PYTHONIOENCODING=gbk（模拟典型 Windows 默认控制台）下
+    运行 CLI 不得出现 UnicodeEncodeError 裸栈。"""
+    import os
+    import subprocess
+
+    env = dict(os.environ, PYTHONIOENCODING="gbk")
+    monkeypatch.chdir(tmp_path)  # 空目录：ask 无索引 -> 走 ⚠️ 提示路径（含 emoji）
+    res = subprocess.run(
+        [sys.executable, str(Path(agent.__file__)), "ask", "hi"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env, timeout=120, cwd=str(tmp_path),
+    )
+    combined = (res.stdout or "") + (res.stderr or "")
+    assert "UnicodeEncodeError" not in combined, f"GBK 环境下 CLI 裸崩：\n{combined[-800:]}"
+    assert "Traceback" not in combined

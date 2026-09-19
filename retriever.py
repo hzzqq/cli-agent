@@ -137,13 +137,24 @@ def find_related(
     后再与每个 entry.path 比较，确保任意路径写法下都能可靠排除自身。
     """
     hits = retrieve_scored(content, top_k=top_k + 1, min_score=min_score,
-                          index_path=index_path)
+                           index_path=index_path)
     targets = {target_path, os.path.abspath(target_path), os.path.basename(target_path)}
     try:
         targets.add(os.path.relpath(os.path.abspath(target_path)))
     except ValueError:
         pass
-    rel = [(e, s) for e, s in hits if e.path not in targets]
+    # R2 修复（c165，POSIX 路径形态失配）：index 以 root="." 建立时
+    # entry.path 形如 ./x.py（os.path.join(".", "x") 的 POSIX 结果），而
+    # 原排除集（原名/abspath/basename/relpath）在 POSIX 下没有 ./ 前缀形态，
+    # 自身仍会被列为「最相似」（Windows 被 relpath 的 .\ 前缀巧合掩盖，POSIX/CI 暴露）。
+    # 现补绝对路径对比：entry 相对路径按 cwd 解析后与目标绝对路径比较，覆盖全形态。
+    abs_target = os.path.abspath(target_path)
+    rel = []
+    for e, s in hits:
+        if os.path.abspath(e.path) == abs_target:
+            continue
+        if e.path not in targets:
+            rel.append((e, s))
     return rel[:top_k]
 
 

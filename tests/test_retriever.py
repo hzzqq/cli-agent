@@ -305,3 +305,27 @@ def test_find_related_top_k(tmp_path, monkeypatch):
     rel = find_related("def target_func(): pass", "target.py", top_k=2)
     assert len(rel) == 2  # 不超过 top_k（已排除自身）
     assert all(e.path != "target.py" for e, _ in rel)
+
+
+def test_find_related_excludes_self_posix_style_path(tmp_path, monkeypatch):
+    """R2 修复验证（c165）：root="." 建索引时 entry.path 形如 ./x.py，
+    原排除集（原名/abspath/basename/relpath）在 POSIX 下没有该形态，
+    `related x.py` 会把目标文件自己列为「最相似」。现按绝对路径对比排除。"""
+    from index_store import IndexEntry, save_index
+    from retriever import find_related
+
+    content = "def agent_main():\n    return 'cli agent entry'"
+    save_index(
+        [
+            # POSIX 形态（root="." 时 os.path.join(".", name) 的真实结果）
+            IndexEntry(path="./agent.py", size=len(content), snippet=content),
+            IndexEntry(path="./other.py", size=20, snippet="def other():\n    return 'foo agent'"),
+        ],
+        str(tmp_path),
+    )
+    monkeypatch.chdir(tmp_path)
+    rel = find_related(content, "agent.py", top_k=5, index_path=str(tmp_path / ".cliagent_index.json"))
+    paths = [e.path for e, _ in rel]
+    assert "./agent.py" not in paths, "目标文件自身不得出现在 related 结果中"
+    assert "./other.py" in paths
+

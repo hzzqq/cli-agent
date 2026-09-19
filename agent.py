@@ -1298,7 +1298,25 @@ def chat(
         typer.echo("")
 
 
+def _make_output_console_safe() -> None:
+    """R2 修复（Windows GBK 环境裸崩，c165）：非 UTF-8 控制台/重定向下
+    （Windows 典型默认 cp936），CLI 输出中的 emoji（🔍/⚠️/📚/👋…）会触发
+    UnicodeEncodeError 裸栈崩溃——已实测复现（PYTHONIOENCODING=gbk 下
+    任意带 emoji 的命令直接 traceback）。在入口对 stdout/stderr 做
+    reconfigure(errors='replace')：保持原编码不变（GBK 控制台中文正常），
+    仅把不可编码字符降级为 `?`；UTF-8 环境（现代终端/CI）完全不受影响。
+    CliRunner 等测试替身不是 TextIOWrapper、无 reconfigure，需 hasattr 守卫。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except (OSError, ValueError):  # 已关闭/非法流：静默跳过
+                pass
+
+
 def main():
+    _make_output_console_safe()
     try:
         app()
     except KeyboardInterrupt:
