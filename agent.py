@@ -253,8 +253,19 @@ def _unset_file_config(keys: "list[str]", root: str = ".") -> "list[str]":
             del data[k]
             removed.append(k)
     if removed:
-        with open(path, "w", encoding="utf-8") as f:
-            _json.dump(data, f, ensure_ascii=False, indent=2)
+        # R2 修复（c166）：与 _save_file_config 同理改原子写——原实现
+        # open("w") 先截断再写，中途失败会把用户剩余的配置（含 api_key）毁掉。
+        tmp_path = path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                _json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
     return removed
 
 
@@ -500,6 +511,12 @@ def index(
     if not os.path.isdir(path):
         typer.echo(f"⚠️ 索引目标路径不存在或不是目录：{path}", err=True)
         log.error("索引失败：目标路径不是目录 %s", path)
+        raise typer.Exit(code=1)
+    # R2 修复（c166）：--root 指向的索引落盘目录不存在时，save_index 会在
+    # 写盘阶段才裸抛 OSError（traceback），与上方 path 的快速失败不对称。
+    if not os.path.isdir(root):
+        typer.echo(f"⚠️ 索引落盘目录（--root）不存在或不是目录：{root}", err=True)
+        log.error("索引失败：--root 不是目录 %s", root)
         raise typer.Exit(code=1)
     exts = None
     if ext:
@@ -1006,6 +1023,21 @@ def config(
             typer.echo(f"ℹ️  {CONFIG_FILE} 中无匹配键可删除（或文件不存在）")
         return
     cfg = _build_config(model, base_url, api_key) or LLMConfig()
+    # R2 修复（c166）：--save 处理前移。原实现放在 --check 的 --json 分支
+    # return 之后，导致 `config --check --json --save` 静默不保存（无任何提示），
+    # 而 `--check --save`（非 json）却能保存——参数组合行为矛盾。
+    if save:
+        _save_file_config(cfg)
+        # R2 安全/可观测性：配置文件以明文保存 api_key，提示用户注意权限与泄露风险
+        if cfg.api_key:
+            typer.echo(
+                "⚠️ 警告：配置文件将以明文保存 api_key，请注意文件权限与泄露风险"
+                "（建议 chmod 600 或仅保存在可信环境）。",
+                err=True,
+            )
+        # as_json 时提示走 stderr：诊断信息不污染 --json 输出（供流水线解析）
+        typer.echo(f"💾 配置已保存到 {CONFIG_FILE}（后续运行将自动读取）",
+                   err=as_json)
     if check:
         # R1 新能力：端点健康探针，快速判断当前配置能否真正调用 LLM
         health = LLMClient(cfg).health()
@@ -1030,16 +1062,6 @@ def config(
         typer.echo(f"  模型   : {health['model']}")
         if health["error"]:
             typer.echo(f"  错误   : {health['error']}")
-    if save:
-        _save_file_config(cfg)
-        # R2 安全/可观测性：配置文件以明文保存 api_key，提示用户注意权限与泄露风险
-        if cfg.api_key:
-            typer.echo(
-                "⚠️ 警告：配置文件将以明文保存 api_key，请注意文件权限与泄露风险"
-                "（建议 chmod 600 或仅保存在可信环境）。",
-                err=True,
-            )
-        typer.echo(f"💾 配置已保存到 {CONFIG_FILE}（后续运行将自动读取）")
     if as_json and not check:
         out = {
             "base_url": cfg.base_url,
@@ -1078,8 +1100,12 @@ def doctor(
     以退出码 1 提示（便于 CI / 启动脚本判断是否阻断）。
     """
     index_status, index_detail = _index_health(".")
-    health = LLMClient(LLMConfig()).health()
+    # R2 修复（c166）：探针必须走与实际调用一致的合并配置（环境变量 + 配置文件
+    # + 默认值）。原实现用 LLMConfig() 裸默认值探测，用户 config --save 落盘
+    # base_url/model 后，doctor 仍按默认 localhost:11434 探测 -> 误报「LLM 不可用」
+    # 且 critical=True（CI 误阻断），与 config --check 的口径矛盾。
     cfg = _build_config(None, None, None) or LLMConfig()
+    health = LLMClient(cfg).health()
 
     checks = {
         "index": {"status": index_status, "detail": index_detail},

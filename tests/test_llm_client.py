@@ -636,3 +636,31 @@ def test_stream_complete_captures_usage(monkeypatch):
     out = "".join(client.stream_complete([{"role": "user", "content": "hi"}]))
     assert out == "你好"
     assert client.last_usage == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+
+
+def test_complete_empty_choices_raises_llm_error(monkeypatch):
+    """R2 修复（c166）：200 + 空 choices（内容过滤/上游异常）应统一包装为
+    LLMError，而非在守卫之外裸抛 IndexError。"""
+    from llm_client import LLMClient, LLMError
+
+    # 显式强制真实分支：统一入口下 openwebui 测试会进程级设置 MOCK_LLM=1，
+    # 否则 complete 走 mock 短路、测不到空 choices 路径。
+    monkeypatch.setenv("MOCK_LLM", "0")
+
+    class _EmptyChoicesResp:
+        choices = []
+
+    class _FakeCompletions:
+        def create(self, **kwargs):
+            return _EmptyChoicesResp()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    monkeypatch.setattr(LLMClient, "_get_client", lambda self: _FakeClient())
+    client = LLMClient()
+    with pytest.raises(LLMError, match="空 choices"):
+        client.complete([{"role": "user", "content": "问题"}])

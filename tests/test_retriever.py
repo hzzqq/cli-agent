@@ -329,3 +329,30 @@ def test_find_related_excludes_self_posix_style_path(tmp_path, monkeypatch):
     assert "./agent.py" not in paths, "目标文件自身不得出现在 related 结果中"
     assert "./other.py" in paths
 
+
+
+def test_find_related_no_false_self_exclusion_across_roots(tmp_path, monkeypatch):
+    """R2 回归修复（c166）：索引经 --root A 建立而 cwd=B 下存在同名相对路径
+    文件时，c165 按 cwd 解析 entry.path 会把 A 条目误判为目标自身而误排除。
+    现统一按索引所在目录解析。"""
+    from index_store import IndexEntry, save_index
+    from retriever import find_related
+
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    content = "def shared():\n    return 'same content'"
+    save_index(
+        [
+            IndexEntry(path="./note.py", size=len(content), snippet=content),
+            IndexEntry(path="./other.py", size=20, snippet="def shared():\n    return 'x agent'"),
+        ],
+        str(root_a),
+    )
+    monkeypatch.chdir(root_b)
+    rel = find_related(content, "note.py", top_k=5,
+                       index_path=str(root_a / ".cliagent_index.json"))
+    paths = [e.path for e, _ in rel]
+    assert "./note.py" in paths, "A 目录条目不得因 cwd=B 的同名相对路径被误排除"
+    assert "./other.py" in paths

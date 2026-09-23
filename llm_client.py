@@ -265,6 +265,12 @@ class LLMClient:
             # 成功路径
             self.last_attempts = attempts
             self.last_error = None
+            # R2 修复（c166）：部分兼容网关会返回 200 + 空 choices（内容过滤/
+            # 上游异常），原实现 resp.choices[0] 在守卫之外裸抛 IndexError，
+            # 违反「统一包装为 LLMError」的承诺。内容过滤非瞬态错误，直接
+            # 抛出、不再重试。
+            if not getattr(resp, "choices", None):
+                raise LLMError("LLM 返回空 choices（可能被内容过滤或上游异常）")
             message = resp.choices[0].message.content or ""
             # 可观测性：记录 token 用量（部分兼容接口可能不返回 usage）
             try:

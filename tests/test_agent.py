@@ -1315,3 +1315,67 @@ def test_cli_survives_gbk_console_end_to_end(tmp_path, monkeypatch):
     combined = (res.stdout or "") + (res.stderr or "")
     assert "UnicodeEncodeError" not in combined, f"GBK 环境下 CLI 裸崩：\n{combined[-800:]}"
     assert "Traceback" not in combined
+
+
+def test_doctor_uses_merged_config_for_probe(monkeypatch, tmp_path):
+    """R2 修复（c166）：doctor 的 LLM 探针必须走合并配置（环境变量+配置文件
+    +默认值）。原实现用裸 LLMConfig() 默认值探测，config --save 落盘
+    base_url/model 后仍按默认端点误报「LLM 不可用」且 critical=True。"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".cliagent_config.json").write_text(
+        _json.dumps({"base_url": "http://custom:9999/v1", "model": "m1"}), encoding="utf-8")
+    seen = {}
+
+    class _ProbeClient:
+        def __init__(self, config=None):
+            seen["base_url"] = getattr(config, "base_url", None)
+
+        def health(self):
+            return {"ok": True, "mock": True, "model": "m1", "error": None}
+
+    monkeypatch.setattr(agent, "LLMClient", _ProbeClient)
+    monkeypatch.setattr(agent, "_index_health", lambda root=".": ("ok", "ok"))
+    r = runner.invoke(agent.app, ["doctor", "--json"])
+    assert r.exit_code == 0
+    assert seen["base_url"] == "http://custom:9999/v1", "doctor 探针必须使用合并后的配置"
+
+
+def test_config_check_json_save_persists(tmp_path, monkeypatch):
+    """R2 修复（c166）：`config --check --json --save` 必须真的保存。
+    原实现 check 的 json 分支提前 return，--save 被静默吞掉。"""
+    monkeypatch.chdir(tmp_path)
+    r = runner.invoke(agent.app, ["config", "--check", "--json", "--save", "--model", "m9"])
+    assert r.exit_code == 0
+    data = _json.loads(r.stdout)
+    assert data["config"]["model"] == "m9"
+    saved = _json.loads((tmp_path / ".cliagent_config.json").read_text(encoding="utf-8"))
+    assert saved["model"] == "m9"
+
+
+def test_unset_config_atomic_keeps_rest_on_failure(tmp_path, monkeypatch):
+    """R2 修复（c166）：--unset 写回必须原子——中途失败不得毁掉剩余配置。"""
+    cfg_file = tmp_path / ".cliagent_config.json"
+    cfg_file.write_text(_json.dumps({"model": "m1", "api_key": "sk-1"}), encoding="utf-8")
+
+    def _boom(obj, fp, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(agent._json, "dump", _boom)
+    with pytest.raises(OSError):
+        agent._unset_file_config(["model"], root=str(tmp_path))
+    data = _json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert data == {"model": "m1", "api_key": "sk-1"}
+    assert not (tmp_path / ".cliagent_config.json.tmp").exists()
+
+
+def test_index_rejects_missing_root(tmp_path, monkeypatch):
+    """R2 修复（c166）：--root 指向不存在的目录应快速失败（exit 1 + 友好
+    提示），而非在写盘阶段裸抛 OSError traceback。"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("x = 1", encoding="utf-8")
+    r = runner.invoke(agent.app, ["index", "src", "--root", str(tmp_path / "nope")])
+    assert r.exit_code == 1
+    assert "Traceback" not in (r.stderr or "")
+    combined = (r.stdout or "") + (r.stderr or "")
+    assert "--root" in combined

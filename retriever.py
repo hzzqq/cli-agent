@@ -14,7 +14,7 @@ import re
 from collections import Counter
 from typing import List
 
-from index_store import IndexEntry, load_index
+from index_store import IndexEntry, load_index, INDEX_FILE
 
 
 _TOOKEN_RE = re.compile(r"[a-zA-Z0-9_\u4e00-\u9fff]+")
@@ -147,11 +147,17 @@ def find_related(
     # entry.path 形如 ./x.py（os.path.join(".", "x") 的 POSIX 结果），而
     # 原排除集（原名/abspath/basename/relpath）在 POSIX 下没有 ./ 前缀形态，
     # 自身仍会被列为「最相似」（Windows 被 relpath 的 .\ 前缀巧合掩盖，POSIX/CI 暴露）。
-    # 现补绝对路径对比：entry 相对路径按 cwd 解析后与目标绝对路径比较，覆盖全形态。
-    abs_target = os.path.abspath(target_path)
+    # R2 回归修复（c166）：c165 的绝对路径对比按「当前 cwd」解析 entry.path；
+    # 索引经 --root A 建立、而 cwd=B 下恰好存在同名相对路径文件时，A 的条目
+    # 会被误判为「目标自身」而误排除。现统一按「索引所在目录」解析 entry：
+    # 默认场景（索引在 cwd）行为不变，跨目录场景不再误排除。normcase 兼容
+    # Windows 大小写不敏感语义。
+    abs_target = os.path.normcase(os.path.normpath(os.path.abspath(target_path)))
+    index_dir = os.path.dirname(os.path.abspath(index_path or INDEX_FILE))
     rel = []
     for e, s in hits:
-        if os.path.abspath(e.path) == abs_target:
+        abs_entry = os.path.normcase(os.path.normpath(os.path.join(index_dir, e.path)))
+        if abs_entry == abs_target:
             continue
         if e.path not in targets:
             rel.append((e, s))
