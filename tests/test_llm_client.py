@@ -664,3 +664,40 @@ def test_complete_empty_choices_raises_llm_error(monkeypatch):
     client = LLMClient()
     with pytest.raises(LLMError, match="空 choices"):
         client.complete([{"role": "user", "content": "问题"}])
+
+
+def test_is_transient_status_code_word_boundary():
+    """R2 修复（c168）：HTTP 状态码必须按词边界匹配——"15000 超过上限"
+    不得因裸子串命中 "500" 而被误判为瞬态错误白耗重试。"""
+    from llm_client import LLMClient
+
+    assert LLMClient._is_transient(Exception("HTTP 500")) is True
+    assert LLMClient._is_transient(Exception("Error code: 429 - rate limit")) is True
+    assert LLMClient._is_transient(Exception("15000 exceeds max tokens")) is False
+    assert LLMClient._is_transient(Exception("invalid model 5000x")) is False
+    assert LLMClient._is_transient(Exception("connection reset by peer")) is True
+
+
+def test_complete_null_message_raises_llm_error(monkeypatch):
+    """R2 修复（c168）：choices[0].message 为 None（内容过滤常见形态）应
+    统一包装为 LLMError，而非裸抛 AttributeError（c166 空 choices 的姊妹场景）。"""
+    from types import SimpleNamespace
+    from llm_client import LLMClient, LLMError
+
+    # 显式强制真实分支：统一入口下 openwebui 测试会进程级设置 MOCK_LLM=1，
+    # 否则 complete 走 mock 短路、测不到空消息路径（与 c167 守护测试同款免疫）。
+    monkeypatch.setenv("MOCK_LLM", "0")
+
+    resp = SimpleNamespace(choices=[SimpleNamespace(message=None)])
+    comp = SimpleNamespace(create=lambda **kw: resp)
+
+    class _FakeChat:
+        completions = comp
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    monkeypatch.setattr(LLMClient, "_get_client", lambda self: _FakeClient())
+    client = LLMClient()
+    with pytest.raises(LLMError, match="空消息"):
+        client.complete([{"role": "user", "content": "问题"}])

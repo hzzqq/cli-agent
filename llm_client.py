@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -65,12 +66,17 @@ DEFAULT_SYSTEM_PROMPT = (
     "用中文准确、简洁地回答用户的问题。如果上下文不足以回答，请如实说明。"
 )
 
-# 判定为「值得重试」的瞬态错误关键词（网络抖动 / 限流 / 5xx）
+# 判定为「值得重试」的瞬态错误关键词（网络抖动 / 限流；HTTP 状态码由
+# _STATUS_CODE_RE 词边界匹配承担——裸子串 "500" 会误命中 "15000" 等）
 _TRANSIENT_KEYWORDS = (
     "timeout", "timed out", "connection", "reset by peer", "broken pipe",
-    "429", "rate limit", "too many requests", "503", "502", "500",
+    "rate limit", "too many requests",
     "temporary", "try again", "econnrefused", "etimedout",
 )
+
+# R2 修复（c168）：HTTP 状态码单独用词边界正则匹配——裸子串会把
+# 「15000 超过模型上限」误判为含 "500" 的瞬态错误（非瞬态错误白耗退避）
+_STATUS_CODE_RE = re.compile(r"\b(?:429|500|502|503|504)\b")
 
 
 def _compose_messages(messages, system_prompt):
@@ -271,7 +277,13 @@ class LLMClient:
             # 抛出、不再重试。
             if not getattr(resp, "choices", None):
                 raise LLMError("LLM 返回空 choices（可能被内容过滤或上游异常）")
-            message = resp.choices[0].message.content or ""
+            # R2 修复（c168）：部分网关返回 choices[0].message 为 None（内容
+            # 过滤常见形态），原实现取 .content 裸抛 AttributeError——统一
+            # 包装为 LLMError，与「空 choices」同口径。
+            message_obj = resp.choices[0].message
+            if message_obj is None or getattr(message_obj, "content", None) is None:
+                raise LLMError("LLM 返回空消息（可能被内容过滤或上游异常）")
+            message = message_obj.content or ""
             # 可观测性：记录 token 用量（部分兼容接口可能不返回 usage）
             try:
                 self.last_usage = {
@@ -377,8 +389,17 @@ class LLMClient:
 
     @staticmethod
     def _is_transient(exc: Exception) -> bool:
-        """判定异常是否为可重试的瞬态错误（网络抖动 / 限流 / 5xx）。"""
-        return any(k in str(exc).lower() for k in _TRANSIENT_KEYWORDS)
+        """判定异常是否为可重试的瞬态错误（网络抖动 / 限流 / 5xx）。
+
+        R2 修复（c168）：文本类关键词保持子串匹配（网络库措辞多样）；
+        HTTP 状态码改为词边界正则（模块级 _STATUS_CODE_RE）——避免
+        "15000 超过上限" 裸子串命中 "500"、把非瞬态错误误判为瞬态
+        而白耗退避重试。
+        """
+        text = str(exc).lower()
+        if _STATUS_CODE_RE.search(text):
+            return True
+        return any(k in text for k in _TRANSIENT_KEYWORDS)
 
     def _build_sampling_params(self) -> dict:
         """构造统一的采样参数 dict，供 complete / stream_complete 共用。
